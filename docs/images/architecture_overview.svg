@@ -1,0 +1,383 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1020" width="1600" height="1020" font-family="Inter, Figtree, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <!-- Soft Stripe-style card shadow -->
+    <filter id="cardShadow" x="-6%" y="-6%" width="112%" height="116%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0A2540" flood-opacity="0.06"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#0A2540" flood-opacity="0.04"/>
+    </filter>
+    <filter id="chipShadow" x="-8%" y="-8%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#0A2540" flood-opacity="0.08"/>
+    </filter>
+
+    <!-- Subtle background dot grid -->
+    <pattern id="dotGrid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#CBD5E1" opacity="0.45"/>
+    </pattern>
+
+    <!-- Arrow markers -->
+    <marker id="arrowIndigo" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#635BFF"/>
+    </marker>
+    <marker id="arrowEmerald" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#09825D"/>
+    </marker>
+    <marker id="arrowCrimson" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#DF1B41"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#D97706"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#0073E6"/>
+    </marker>
+    <marker id="arrowSlate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#64748B"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect width="1600" height="1020" fill="#F6F9FC" rx="16"/>
+  <rect width="1600" height="1020" fill="url(#dotGrid)" rx="16"/>
+
+  <!-- Top Header Banner -->
+  <rect x="32" y="24" width="1536" height="84" rx="12" fill="#FFFFFF" stroke="#E3E8EE" stroke-width="1.5" filter="url(#cardShadow)"/>
+  <rect x="48" y="42" width="46" height="46" rx="10" fill="#635BFF"/>
+  <path d="M60 65 L67 65 L71 54 L76 76 L80 65 L86 65" fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="110" y="61" font-size="22" font-weight="700" fill="#0A2540">METIX-Switch — System Architecture &amp; Fault-Tolerance Blueprint</text>
+  <text x="110" y="85" font-size="13.5" fill="#425466">ISO 8583 &amp; REST Instant Payment Switch modeled on Mozambique SIMOrede · Banco de Moçambique Notice No. 1/GBM/2026</text>
+
+  <!-- Legend Chips in Header -->
+  <g transform="translate(888, 48)">
+    <rect x="0" y="0" width="164" height="32" rx="16" fill="#E6F7F1" stroke="#A7F3D0"/>
+    <circle cx="16" cy="16" r="4.5" fill="#09825D"/>
+    <text x="28" y="20" font-size="11.5" font-weight="600" fill="#09825D">Happy Path 0200/0210</text>
+
+    <rect x="174" y="0" width="154" height="32" rx="16" fill="#FEE2E7" stroke="#FECDD3"/>
+    <circle cx="190" cy="16" r="4.5" fill="#DF1B41"/>
+    <text x="202" y="20" font-size="11.5" font-weight="600" fill="#DF1B41">Chaos / SLA Breach</text>
+
+    <rect x="338" y="0" width="174" height="32" rx="16" fill="#EEF0FF" stroke="#C7D2FE"/>
+    <circle cx="354" cy="16" r="4.5" fill="#635BFF"/>
+    <text x="366" y="20" font-size="11.5" font-weight="600" fill="#635BFF">0420 Reversal &amp; Guards</text>
+
+    <rect x="522" y="0" width="144" height="32" rx="16" fill="#EBF5FF" stroke="#BFDBFE"/>
+    <circle cx="538" cy="16" r="4.5" fill="#0073E6"/>
+    <text x="550" y="20" font-size="11.5" font-weight="600" fill="#0073E6">Durable State I/O</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- COLUMN 1 (LEFT): OPERATOR CONSOLE & ORIGINATOR PSPs                   -->
+  <!-- ===================================================================== -->
+  <rect x="32" y="132" width="320" height="530" rx="14" fill="#FFFFFF" stroke="#E3E8EE" stroke-width="1.5" filter="url(#cardShadow)"/>
+  <rect x="32" y="132" width="320" height="40" rx="14" fill="#F8FAFC"/>
+  <rect x="32" y="158" width="320" height="14" fill="#F8FAFC"/>
+  <line x1="32" y1="172" x2="352" y2="172" stroke="#E3E8EE" stroke-width="1"/>
+  <text x="50" y="157" font-size="12" font-weight="700" letter-spacing="0.06em" fill="#425466">1. CLIENT &amp; ORIGINATOR PLANE</text>
+
+  <!-- Dashboard Card -->
+  <rect x="50" y="190" width="284" height="168" rx="10" fill="#F6F9FC" stroke="#CBD5E1" stroke-width="1.2"/>
+  <rect x="64" y="204" width="84" height="22" rx="11" fill="#EEF0FF"/>
+  <text x="75" y="219" font-size="11" font-weight="700" fill="#635BFF">PORT 3000</text>
+  <text x="64" y="246" font-size="15" font-weight="700" fill="#0A2540">Interactive Switch Console</text>
+  <text x="64" y="266" font-size="12" fill="#425466">Next.js 15 · React 19 · Meta Astryx UI</text>
+  <line x1="64" y1="278" x2="320" y2="278" stroke="#E3E8EE"/>
+  <text x="64" y="297" font-size="11.5" fill="#0A2540">• Transfer Composer + 5× Retry Storm</text>
+  <text x="64" y="316" font-size="11.5" fill="#0A2540">• Live Chaos Injection Toggles</text>
+  <text x="64" y="335" font-size="11.5" fill="#0A2540">• Real-Time ISO 8583 Wire &amp; Ledger</text>
+  <text x="64" y="351" font-size="10.5" fill="#64748B" font-family="ui-monospace, Menlo, monospace">1.5s zero-preflight GET sync</text>
+
+  <!-- Originator PSPs Card -->
+  <rect x="50" y="378" width="284" height="156" rx="10" fill="#FFFFFF" stroke="#E3E8EE" stroke-width="1.2"/>
+  <text x="64" y="402" font-size="14" font-weight="700" fill="#0A2540">Originator Commercial Banks</text>
+  <text x="64" y="420" font-size="11.5" fill="#425466">DE 102 · ISO 4217 Currency 943 (MZN)</text>
+
+  <rect x="64" y="432" width="256" height="40" rx="7" fill="#F8FAFC" stroke="#E3E8EE"/>
+  <text x="74" y="450" font-size="12" font-weight="700" fill="#0A2540">BCI_MZ</text>
+  <text x="132" y="450" font-size="11" fill="#425466">CGDIMZMA</text>
+  <text x="74" y="465" font-size="10.5" fill="#64748B" font-family="ui-monospace, Menlo, monospace">IND 200k MT cap · BUS 500k MT cap</text>
+
+  <rect x="64" y="480" width="256" height="40" rx="7" fill="#F8FAFC" stroke="#E3E8EE"/>
+  <text x="74" y="498" font-size="12" font-weight="700" fill="#0A2540">STDB_MZ</text>
+  <text x="142" y="498" font-size="11" fill="#425466">SBICMZMX</text>
+  <text x="74" y="513" font-size="10.5" fill="#64748B" font-family="ui-monospace, Menlo, monospace">IND 200k MT cap · BUS 500k MT cap</text>
+
+  <!-- Retry Storm Callout -->
+  <rect x="50" y="552" width="284" height="92" rx="10" fill="#FEF3C7" stroke="#FCD34D" stroke-width="1.2"/>
+  <text x="64" y="574" font-size="12" font-weight="700" fill="#92400E">Unstable Mobile / Gateway Retries</text>
+  <text x="64" y="593" font-size="11.5" fill="#78350F">5× concurrent POST /api/v1/transfers</text>
+  <text x="64" y="611" font-size="11.5" fill="#78350F">with identical idempotency_key</text>
+  <text x="64" y="630" font-size="11" font-weight="700" fill="#09825D">→ Absorbed by Redis SET NX (1 debit)</text>
+
+  <!-- ===================================================================== -->
+  <!-- COLUMN 2 (CENTER): METIX CENTRAL SWITCH CONTROL PLANE                 -->
+  <!-- ===================================================================== -->
+  <rect x="424" y="132" width="716" height="530" rx="14" fill="#FFFFFF" stroke="#635BFF" stroke-width="2" filter="url(#cardShadow)"/>
+  <rect x="424" y="132" width="716" height="42" rx="14" fill="#EEF0FF"/>
+  <rect x="424" y="160" width="716" height="14" fill="#EEF0FF"/>
+  <line x1="424" y1="174" x2="1140" y2="174" stroke="#C7D2FE" stroke-width="1"/>
+  <text x="444" y="158" font-size="12.5" font-weight="700" letter-spacing="0.06em" fill="#4338CA">2. METIX CENTRAL SWITCH CONTROL PLANE — switch-api (FastAPI · Python 3.14 · Port 8000)</text>
+
+  <!-- Step 1 & Step 2 Row -->
+  <rect x="446" y="192" width="324" height="114" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.2"/>
+  <circle cx="468" cy="215" r="11" fill="#635BFF"/>
+  <text x="464" y="219" font-size="11.5" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="488" y="219" font-size="13.5" font-weight="700" fill="#0A2540">RedisGuard — Idempotency &amp; Limits</text>
+  <text x="460" y="241" font-size="11.5" fill="#425466">• Atomic <tspan font-family="ui-monospace, Menlo, monospace" fill="#0A2540">SET idemp:lock NX EX 86400</tspan></text>
+  <text x="460" y="260" font-size="11.5" fill="#425466">• Duplicates wait on <tspan font-family="ui-monospace, Menlo, monospace" fill="#0A2540">idemp:tx</tspan> (0 double-debit)</text>
+  <text x="460" y="279" font-size="11.5" fill="#425466">• Lua Notice 1/GBM/2026 CAT daily cap check</text>
+  <text x="460" y="296" font-size="11" font-weight="700" fill="#DF1B41">  Breach → DECLINED (DE 39=61, 0 ledger writes)</text>
+
+  <rect x="794" y="192" width="324" height="114" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.2"/>
+  <circle cx="816" cy="215" r="11" fill="#635BFF"/>
+  <text x="812" y="219" font-size="11.5" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="836" y="219" font-size="13.5" font-weight="700" fill="#0A2540">ISO 8583 Canonical Engine &amp; Codec</text>
+  <text x="808" y="241" font-size="11.5" fill="#425466">• Generates 6-digit <tspan font-family="ui-monospace, Menlo, monospace" fill="#0A2540">STAN</tspan> &amp; 12-char <tspan font-family="ui-monospace, Menlo, monospace" fill="#0A2540">RRN</tspan></text>
+  <text x="808" y="260" font-size="11.5" fill="#425466">• Packs 128-bit Hex Bitmap + Fixed/LLVAR ASCII</text>
+  <text x="808" y="279" font-size="11.5" fill="#425466">• Enforces <tspan font-family="ui-monospace, Menlo, monospace" fill="#0A2540">DE 4</tspan> (centavos) &amp; <tspan font-family="ui-monospace, Menlo, monospace" fill="#0A2540">DE 49 = 943</tspan> (MZN)</text>
+  <text x="808" y="296" font-size="11" font-weight="600" fill="#0073E6">  Logs JSONB + raw ASCII to iso8583_message_log</text>
+
+  <!-- Step 3: Double-Entry Clearing Hold & Suspense -->
+  <rect x="446" y="324" width="672" height="130" rx="10" fill="#FFFFFF" stroke="#09825D" stroke-width="1.5"/>
+  <circle cx="468" cy="347" r="11" fill="#09825D"/>
+  <text x="464" y="351" font-size="11.5" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="488" y="351" font-size="13.5" font-weight="700" fill="#0A2540">Double-Entry Clearing &amp; Suspense LedgerService (Optimistic Lock + UUID Ordering)</text>
+
+  <!-- Three flow boxes inside Step 3 -->
+  <rect x="462" y="366" width="184" height="72" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="474" y="385" font-size="11.5" font-weight="700" fill="#0A2540">Originator Account</text>
+  <text x="474" y="402" font-size="10.5" fill="#DF1B41" font-family="ui-monospace, Menlo, monospace">DEBIT -amount (Leg 1)</text>
+  <text x="474" y="418" font-size="10.5" fill="#09825D" font-family="ui-monospace, Menlo, monospace">CREDIT +amount (Reversal)</text>
+  <text x="474" y="432" font-size="10" fill="#64748B">WHERE version = expected</text>
+
+  <rect x="690" y="366" width="184" height="72" rx="8" fill="#EEF0FF" stroke="#635BFF" stroke-width="1.4"/>
+  <text x="702" y="385" font-size="11.5" font-weight="700" fill="#4338CA">METIX-SUSPENSE-943</text>
+  <text x="702" y="402" font-size="10.5" fill="#4338CA" font-family="ui-monospace, Menlo, monospace">Holds in-flight ROUTED</text>
+  <text x="702" y="418" font-size="10.5" fill="#09825D" font-family="ui-monospace, Menlo, monospace">Idle Balance = 0.00 MT</text>
+  <text x="702" y="432" font-size="10" fill="#64748B">SUM(DEBIT) == SUM(CREDIT)</text>
+
+  <rect x="918" y="366" width="184" height="72" rx="8" fill="#E6F7F1" stroke="#6EE7B7"/>
+  <text x="930" y="385" font-size="11.5" font-weight="700" fill="#065F46">Beneficiary Wallet</text>
+  <text x="930" y="402" font-size="10.5" fill="#09825D" font-family="ui-monospace, Menlo, monospace">CREDIT +amount (Leg 2)</text>
+  <text x="930" y="418" font-size="10.5" fill="#425466">Only on 0210 DE 39 = 00</text>
+  <text x="930" y="432" font-size="10" fill="#64748B">Never credited if TIMED_OUT</text>
+
+  <!-- Internal arrows inside Step 3 -->
+  <path d="M 646 392 L 688 392" stroke="#D97706" stroke-width="2" marker-end="url(#arrowAmber)"/>
+  <text x="651" y="386" font-size="9.5" font-weight="700" fill="#B45309">Leg 1</text>
+  <path d="M 688 416 L 648 416" stroke="#635BFF" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrowIndigo)"/>
+  <text x="653" y="430" font-size="9.5" font-weight="700" fill="#635BFF">Rev</text>
+  <path d="M 874 402 L 916 402" stroke="#09825D" stroke-width="2" marker-end="url(#arrowEmerald)"/>
+  <text x="879" y="395" font-size="9.5" font-weight="700" fill="#09825D">Leg 2</text>
+
+  <!-- Step 4: Strict State Machine & Late-0210 Race Guard -->
+  <rect x="446" y="472" width="672" height="172" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.2"/>
+  <circle cx="468" cy="495" r="11" fill="#0A2540"/>
+  <text x="464" y="499" font-size="11.5" font-weight="700" fill="#FFFFFF">4</text>
+  <text x="488" y="499" font-size="13.5" font-weight="700" fill="#0A2540">Monotonic Transaction State Machine &amp; Late-0210 Concurrency Guard</text>
+
+  <!-- State pills diagram inside Step 4 -->
+  <rect x="464" y="518" width="90" height="30" rx="6" fill="#FFFFFF" stroke="#94A3B8"/>
+  <text x="477" y="537" font-size="11" font-weight="700" fill="#0A2540">INITIATED</text>
+
+  <path d="M 554 533 L 586 533" stroke="#64748B" stroke-width="1.8" marker-end="url(#arrowSlate)"/>
+
+  <rect x="588" y="518" width="112" height="30" rx="6" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.4"/>
+  <text x="600" y="537" font-size="11" font-weight="700" fill="#92400E">ROUTED (25s)</text>
+
+  <!-- Branch 1: COMPLETED -->
+  <path d="M 700 526 L 764 526" stroke="#09825D" stroke-width="2" marker-end="url(#arrowEmerald)"/>
+  <text x="712" y="520" font-size="9.5" font-weight="700" fill="#09825D">0210=00</text>
+  <rect x="766" y="511" width="106" height="28" rx="6" fill="#E6F7F1" stroke="#09825D" stroke-width="1.4"/>
+  <text x="783" y="529" font-size="11" font-weight="700" fill="#09825D">COMPLETED</text>
+
+  <!-- Branch 2: DECLINED -->
+  <path d="M 644 548 L 644 584 L 764 584" fill="none" stroke="#DF1B41" stroke-width="1.8" marker-end="url(#arrowCrimson)"/>
+  <text x="652" y="578" font-size="9.5" font-weight="700" fill="#DF1B41">DE 39=91 / 61 / 51</text>
+  <rect x="766" y="570" width="106" height="28" rx="6" fill="#FEE2E7" stroke="#DF1B41" stroke-width="1.4"/>
+  <text x="789" y="588" font-size="11" font-weight="700" fill="#DF1B41">DECLINED</text>
+
+  <!-- Branch 3: TIMED_OUT -> REVERSAL_SENT -> REVERSED / RECON_HOLD -->
+  <path d="M 622 548 L 622 620 L 664 620" fill="none" stroke="#635BFF" stroke-width="1.8" stroke-dasharray="4,2" marker-end="url(#arrowIndigo)"/>
+  <rect x="666" y="606" width="90" height="26" rx="6" fill="#FEE2E7" stroke="#DF1B41"/>
+  <text x="676" y="623" font-size="10.5" font-weight="700" fill="#DF1B41">TIMED_OUT</text>
+  <path d="M 756 619 L 780 619" stroke="#635BFF" stroke-width="1.8" marker-end="url(#arrowIndigo)"/>
+  <rect x="782" y="606" width="110" height="26" rx="6" fill="#EEF0FF" stroke="#635BFF"/>
+  <text x="791" y="623" font-size="10.5" font-weight="700" fill="#4338CA">REVERSAL_SENT</text>
+  <path d="M 892 619 L 920 619" stroke="#0073E6" stroke-width="1.8" marker-end="url(#arrowBlue)"/>
+  <rect x="922" y="606" width="84" height="26" rx="6" fill="#EBF5FF" stroke="#0073E6" stroke-width="1.4"/>
+  <text x="935" y="623" font-size="10.5" font-weight="700" fill="#0073E6">REVERSED</text>
+
+  <!-- RECON_HOLD branch -->
+  <path d="M 892 612 L 912 560 L 922 560" fill="none" stroke="#D97706" stroke-width="1.6" stroke-dasharray="3,2" marker-end="url(#arrowAmber)"/>
+  <rect x="922" y="546" width="106" height="26" rx="6" fill="#FEF3C7" stroke="#D97706" stroke-width="1.4"/>
+  <text x="935" y="563" font-size="10.5" font-weight="700" fill="#B45309">RECON_HOLD</text>
+  <text x="1034" y="563" font-size="9.5" fill="#B45309">if 0430 fails</text>
+
+  <!-- Late 0210 Guard Note -->
+  <rect x="892" y="511" width="212" height="28" rx="6" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="900" y="529" font-size="10" font-weight="600" fill="#0A2540">Row Lock FOR UPDATE blocks late 0210</text>
+
+  <!-- ===================================================================== -->
+  <!-- COLUMN 3 (RIGHT): BENEFICIARY PSP & CHAOS SIMULATOR                   -->
+  <!-- ===================================================================== -->
+  <rect x="1212" y="132" width="356" height="530" rx="14" fill="#FFFFFF" stroke="#DF1B41" stroke-width="1.6" filter="url(#cardShadow)"/>
+  <rect x="1212" y="132" width="356" height="42" rx="14" fill="#FFF1F2"/>
+  <rect x="1212" y="160" width="356" height="14" fill="#FFF1F2"/>
+  <line x1="1212" y1="174" x2="1568" y2="174" stroke="#FECDD3" stroke-width="1"/>
+  <text x="1230" y="158" font-size="12" font-weight="700" letter-spacing="0.06em" fill="#BE123C">3. BENEFICIARY PSP &amp; CHAOS PLANE</text>
+
+  <!-- Wallets Box -->
+  <rect x="1230" y="192" width="320" height="122" rx="10" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="1244" y="215" font-size="14" font-weight="700" fill="#0A2540">E-Money Issuers / Wallets (DE 103)</text>
+  <text x="1244" y="233" font-size="11" fill="#64748B" font-family="ui-monospace, Menlo, monospace">POST /sim/beneficiary/iso8583</text>
+
+  <rect x="1244" y="246" width="140" height="54" rx="7" fill="#FFFFFF" stroke="#E3E8EE"/>
+  <text x="1256" y="267" font-size="12.5" font-weight="700" fill="#0A2540">MPESA_MZ</text>
+  <text x="1256" y="284" font-size="10.5" fill="#425466">Vodacom M-Pesa</text>
+
+  <rect x="1396" y="246" width="140" height="54" rx="7" fill="#FFFFFF" stroke="#E3E8EE"/>
+  <text x="1408" y="267" font-size="12.5" font-weight="700" fill="#0A2540">EMOLA_MZ</text>
+  <text x="1408" y="284" font-size="10.5" fill="#425466">Movitel e-Mola</text>
+
+  <!-- Chaos Injection Modes -->
+  <rect x="1230" y="330" width="320" height="314" rx="10" fill="#FFFFFF" stroke="#FECDD3" stroke-width="1.3"/>
+  <text x="1246" y="354" font-size="13.5" font-weight="700" fill="#0A2540">Live Chaos Fault Injection Modes</text>
+  <text x="1246" y="371" font-size="11" fill="#64748B">Read dynamically from Redis <tspan font-family="ui-monospace, Menlo, monospace">metix:chaos:config</tspan></text>
+
+  <rect x="1246" y="384" width="288" height="42" rx="7" fill="#E6F7F1" stroke="#A7F3D0"/>
+  <text x="1258" y="402" font-size="11.5" font-weight="700" fill="#065F46">normal (200ms) → DE 39 = 00</text>
+  <text x="1258" y="418" font-size="10.5" fill="#047857">Healthy instant 0210 approval + 6-char Auth ID</text>
+
+  <rect x="1246" y="434" width="288" height="42" rx="7" fill="#FEF3C7" stroke="#FCD34D"/>
+  <text x="1258" y="452" font-size="11.5" font-weight="700" fill="#92400E">slow_15s (15,000ms) → Within 25s SLA</text>
+  <text x="1258" y="468" font-size="10.5" fill="#78350F">Holds funds in Suspense 15s, then settles 0210=00</text>
+
+  <rect x="1246" y="484" width="288" height="42" rx="7" fill="#FEE2E7" stroke="#FDA4AF"/>
+  <text x="1258" y="502" font-size="11.5" font-weight="700" fill="#BE123C">drop_0210 → Triggers 25s SLA Reversal</text>
+  <text x="1258" y="518" font-size="10.5" fill="#9F1239">Drops 0210 ACK; sweeper emits 0420 (DE 39=68)</text>
+
+  <rect x="1246" y="534" width="288" height="42" rx="7" fill="#FEE2E7" stroke="#FDA4AF"/>
+  <text x="1258" y="552" font-size="11.5" font-weight="700" fill="#BE123C">inoperative_91 → DE 39 = 91 Decline</text>
+  <text x="1258" y="568" font-size="10.5" fill="#9F1239">Immediate balanced REVERSAL &amp; quota release</text>
+
+  <rect x="1246" y="584" width="288" height="44" rx="7" fill="#FEF3C7" stroke="#F59E0B"/>
+  <text x="1258" y="602" font-size="11.5" font-weight="700" fill="#92400E">recon_hold → Drop 0210 + Drop 0430</text>
+  <text x="1258" y="618" font-size="10.5" fill="#78350F">Quarantines funds in Suspense for manual ops</text>
+
+  <!-- ===================================================================== -->
+  <!-- BOTTOM ROW: DURABLE DATA PLANE & ASYNC 25s SLA RECOVERY WORKER        -->
+  <!-- ===================================================================== -->
+
+  <!-- Persistent Redis 7 Card -->
+  <rect x="32" y="728" width="468" height="260" rx="14" fill="#FFFFFF" stroke="#DC2626" stroke-width="1.5" filter="url(#cardShadow)"/>
+  <rect x="32" y="728" width="468" height="40" rx="14" fill="#FEF2F2"/>
+  <rect x="32" y="754" width="468" height="14" fill="#FEF2F2"/>
+  <line x1="32" y1="768" x2="500" y2="768" stroke="#FECACA"/>
+  <text x="50" y="753" font-size="12" font-weight="700" letter-spacing="0.06em" fill="#B91C1C">4. PERSISTENT REDIS 7 — AOF + RDB (metix_redisdata · :6380)</text>
+
+  <text x="52" y="794" font-size="12.5" font-weight="700" fill="#0A2540">Atomic Concurrency &amp; Regulatory Guard Store</text>
+  <rect x="52" y="808" width="428" height="162" rx="8" fill="#0A2540"/>
+  <text x="66" y="831" font-size="9.8" fill="#94A3B8" font-family="ui-monospace, Menlo, monospace"># Persistent: --appendonly yes --appendfsync everysec --save 60 1</text>
+  <text x="66" y="854" font-size="10.5" fill="#A5B4FC" font-family="ui-monospace, Menlo, monospace">metix:idemp:lock:{key}     <tspan fill="#E2E8F0">→ SET NX EX 86400 (Storm Lock)</tspan></text>
+  <text x="66" y="875" font-size="10.5" fill="#A5B4FC" font-family="ui-monospace, Menlo, monospace">metix:idemp:tx:{key}       <tspan fill="#E2E8F0">→ Canonical SwitchTx UUID</tspan></text>
+  <text x="66" y="896" font-size="10.5" fill="#6EE7B7" font-family="ui-monospace, Menlo, monospace">metix:daily_limit:{id}:{d} <tspan fill="#E2E8F0">→ Atomic Lua 200k/500k MT Cap</tspan></text>
+  <text x="66" y="917" font-size="10.5" fill="#FCD34D" font-family="ui-monospace, Menlo, monospace">metix:seq:stan             <tspan fill="#E2E8F0">→ Monotonic 6-digit STAN</tspan></text>
+  <text x="66" y="938" font-size="10.5" fill="#FDA4AF" font-family="ui-monospace, Menlo, monospace">metix:chaos:config         <tspan fill="#E2E8F0">→ Live Fault Injection JSON</tspan></text>
+  <text x="66" y="959" font-size="10.5" fill="#94A3B8" font-family="ui-monospace, Menlo, monospace">Survives container restarts via Docker volume /data</text>
+
+  <!-- PostgreSQL 16 Card -->
+  <rect x="536" y="728" width="516" height="260" rx="14" fill="#FFFFFF" stroke="#0073E6" stroke-width="1.5" filter="url(#cardShadow)"/>
+  <rect x="536" y="728" width="516" height="40" rx="14" fill="#EBF5FF"/>
+  <rect x="536" y="754" width="516" height="14" fill="#EBF5FF"/>
+  <line x1="536" y1="768" x2="1052" y2="768" stroke="#BFDBFE"/>
+  <text x="554" y="753" font-size="12" font-weight="700" letter-spacing="0.06em" fill="#0369A1">5. POSTGRESQL 16 LEDGER — ACID WAL (metix_pgdata · :5433)</text>
+
+  <g transform="translate(554, 784)">
+    <rect x="0" y="0" width="232" height="86" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+    <text x="12" y="21" font-size="12" font-weight="700" fill="#0A2540">accounts &amp; institutions</text>
+    <text x="12" y="39" font-size="11" fill="#425466">• balance_centavos (BIGINT)</text>
+    <text x="12" y="56" font-size="11" fill="#425466">• version (Optimistic Lock)</text>
+    <text x="12" y="73" font-size="11" fill="#09825D">• CHECK (currency = '943')</text>
+
+    <rect x="248" y="0" width="232" height="86" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+    <text x="260" y="21" font-size="12" font-weight="700" fill="#0A2540">journal_entries &amp; postings</text>
+    <text x="260" y="39" font-size="11" fill="#425466">• Immutable DEBIT / CREDIT</text>
+    <text x="260" y="56" font-size="11" fill="#425466">• CLEARING / SETTLE / REV</text>
+    <text x="260" y="73" font-size="11" fill="#09825D">• SUM(DR) == SUM(CR)</text>
+
+    <rect x="0" y="98" width="232" height="86" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+    <text x="12" y="119" font-size="12" font-weight="700" fill="#0A2540">switch_transactions</text>
+    <text x="12" y="137" font-size="11" fill="#425466">• idempotency_key (UNIQUE)</text>
+    <text x="12" y="154" font-size="11" fill="#425466">• Index(status, sla_deadline)</text>
+    <text x="12" y="171" font-size="11" fill="#635BFF">• Monotonic status machine</text>
+
+    <rect x="248" y="98" width="232" height="86" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+    <text x="260" y="119" font-size="12" font-weight="700" fill="#0A2540">iso8583_message_log</text>
+    <text x="260" y="137" font-size="11" fill="#425466">• MTI 0200/0210/0420/0430</text>
+    <text x="260" y="154" font-size="11" fill="#425466">• payload_json (JSONB)</text>
+    <text x="260" y="171" font-size="11" fill="#0073E6">• raw_iso_snippet (ASCII)</text>
+  </g>
+
+  <!-- Async 25s SPIM SLA Sweeper Worker Card -->
+  <rect x="1088" y="728" width="480" height="260" rx="14" fill="#FFFFFF" stroke="#635BFF" stroke-width="1.8" filter="url(#cardShadow)"/>
+  <rect x="1088" y="728" width="480" height="40" rx="14" fill="#EEF0FF"/>
+  <rect x="1088" y="754" width="480" height="14" fill="#EEF0FF"/>
+  <line x1="1088" y1="768" x2="1568" y2="768" stroke="#C7D2FE"/>
+  <text x="1106" y="753" font-size="12" font-weight="700" letter-spacing="0.06em" fill="#4338CA">6. ASYNC 25s SPIM SLA RECOVERY — sla-sweeper WORKER</text>
+
+  <rect x="1106" y="784" width="444" height="82" rx="8" fill="#FEF3C7" stroke="#FCD34D"/>
+  <text x="1120" y="805" font-size="12" font-weight="700" fill="#92400E">Phase A — Lock-Safe Claim (No Network I/O Held)</text>
+  <text x="1120" y="824" font-size="11" fill="#78350F" font-family="ui-monospace, Menlo, monospace">SELECT ... WHERE status='ROUTED' AND sla_deadline &lt;= NOW()</text>
+  <text x="1120" y="841" font-size="11" fill="#78350F" font-family="ui-monospace, Menlo, monospace">FOR UPDATE SKIP LOCKED  → TIMED_OUT (68) → REVERSAL_SENT</text>
+  <text x="1120" y="857" font-size="10.5" fill="#92400E">Safe for horizontal scaling — multiple replicas never double-reverse</text>
+
+  <rect x="1106" y="878" width="444" height="92" rx="8" fill="#EEF0FF" stroke="#C7D2FE"/>
+  <text x="1120" y="899" font-size="12" font-weight="700" fill="#4338CA">Phase B — MTI 0420 Reversal Advice &amp; Finalization</text>
+  <text x="1120" y="918" font-size="11.5" fill="#0A2540">• Sends <tspan font-family="ui-monospace, Menlo, monospace" font-weight="700">MTI 0420</tspan> with 42-char <tspan font-family="ui-monospace, Menlo, monospace" font-weight="700">DE 90</tspan> Original Data Elements</text>
+  <text x="1120" y="937" font-size="11.5" fill="#09825D">• On 0430 (DE 39=00): Posts REVERSAL + Releases Redis Cap → REVERSED</text>
+  <text x="1120" y="956" font-size="11.5" fill="#B45309">• On Dropped 0430: Escalates → RECON_HOLD (Funds Safe in Suspense)</text>
+
+  <!-- ===================================================================== -->
+  <!-- CONNECTING FLOW ARROWS BETWEEN PLANES                                 -->
+  <!-- ===================================================================== -->
+
+  <!-- Client -> Switch API -->
+  <path d="M 352 290 L 420 290" stroke="#09825D" stroke-width="2.4" marker-end="url(#arrowEmerald)"/>
+  <rect x="357" y="264" width="60" height="20" rx="5" fill="#E6F7F1" stroke="#A7F3D0"/>
+  <text x="364" y="278" font-size="10" font-weight="700" fill="#09825D">POST 0200</text>
+
+  <!-- Switch API -> Client -->
+  <path d="M 424 330 L 356 330" stroke="#635BFF" stroke-width="2.2" marker-end="url(#arrowIndigo)"/>
+  <rect x="357" y="336" width="60" height="20" rx="5" fill="#EEF0FF" stroke="#C7D2FE"/>
+  <text x="364" y="350" font-size="10" font-weight="700" fill="#635BFF">0210 / Live</text>
+
+  <!-- Switch API -> Beneficiary (0200) -->
+  <path d="M 1140 250 L 1208 250" stroke="#09825D" stroke-width="2.4" marker-end="url(#arrowEmerald)"/>
+  <rect x="1147" y="224" width="56" height="20" rx="5" fill="#E6F7F1" stroke="#A7F3D0"/>
+  <text x="1154" y="238" font-size="10" font-weight="700" fill="#09825D">MTI 0200</text>
+
+  <!-- Beneficiary -> Switch API (0210 or Fault) -->
+  <path d="M 1212 294 L 1144 294" stroke="#DF1B41" stroke-width="2.2" stroke-dasharray="5,3" marker-end="url(#arrowCrimson)"/>
+  <rect x="1144" y="300" width="64" height="20" rx="5" fill="#FEE2E7" stroke="#FDA4AF"/>
+  <text x="1149" y="314" font-size="9.5" font-weight="700" fill="#DF1B41">0210 / Drop</text>
+
+  <!-- Switch API <-> Redis -->
+  <path d="M 520 662 L 520 695 L 280 695 L 280 724" fill="none" stroke="#DF1B41" stroke-width="2.2" marker-end="url(#arrowCrimson)"/>
+  <rect x="304" y="684" width="184" height="22" rx="6" fill="#FFFFFF" stroke="#FECACA"/>
+  <text x="314" y="699" font-size="10.5" font-weight="700" fill="#B91C1C">SET NX · Lua Caps · STAN</text>
+
+  <!-- Switch API <-> PostgreSQL -->
+  <path d="M 790 662 L 790 724" stroke="#0073E6" stroke-width="2.4" marker-end="url(#arrowBlue)"/>
+  <rect x="692" y="683" width="196" height="22" rx="6" fill="#FFFFFF" stroke="#BFDBFE"/>
+  <text x="703" y="698" font-size="10.5" font-weight="700" fill="#0369A1">ACID Journals + Wire Audit Log</text>
+
+  <!-- SLA Sweeper <-> PostgreSQL -->
+  <path d="M 1088 845 L 1056 845" stroke="#0073E6" stroke-width="2.2" marker-end="url(#arrowBlue)"/>
+  <path d="M 1052 872 L 1084 872" stroke="#635BFF" stroke-width="2.2" marker-end="url(#arrowIndigo)"/>
+
+  <!-- SLA Sweeper <-> Beneficiary (0420 / 0430) -->
+  <path d="M 1390 728 L 1390 666" stroke="#635BFF" stroke-width="2.4" marker-end="url(#arrowIndigo)"/>
+  <rect x="1310" y="684" width="160" height="22" rx="6" fill="#EEF0FF" stroke="#C7D2FE"/>
+  <text x="1320" y="699" font-size="10.5" font-weight="700" fill="#4338CA">0420 (DE 90) ↔ 0430</text>
+</svg>

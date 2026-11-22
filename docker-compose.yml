@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: metix-postgres
+    environment:
+      POSTGRES_USER: metix
+      POSTGRES_PASSWORD: metix_secret
+      POSTGRES_DB: metix_switch
+    ports:
+      - "5433:5432"
+    volumes:
+      - metix_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metix -d metix_switch"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: metix-redis
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - metix_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  switch-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: metix-switch-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://metix:metix_secret@postgres:5432/metix_switch
+      REDIS_URL: redis://redis:6379/0
+      BENEFICIARY_BASE_URL: http://switch-api:8000
+      SPIM_SLA_SECONDS: "25"
+      RUN_INLINE_SWEEPER: "false"
+      CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sla-sweeper:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: metix-sla-sweeper
+    command: ["uv", "run", "--no-dev", "python", "-m", "app.workers.sla_sweeper"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://metix:metix_secret@postgres:5432/metix_switch
+      REDIS_URL: redis://redis:6379/0
+      BENEFICIARY_BASE_URL: http://switch-api:8000
+      SPIM_SLA_SECONDS: "25"
+      SWEEPER_POLL_INTERVAL_SECONDS: "1.0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      switch-api:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: metix-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      switch-api:
+        condition: service_healthy
+
+volumes:
+  metix_pgdata:
+  metix_redisdata:
