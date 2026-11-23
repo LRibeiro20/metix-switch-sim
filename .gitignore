@@ -13,3 +13,9 @@ out/
 # Environment
 .env
 .env.local
+
+# GEMINI 
+.gemini.md
+GEMINI.md
+GEMINI
+    

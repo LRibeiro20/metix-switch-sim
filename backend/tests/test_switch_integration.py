@@ -21,9 +21,12 @@ from app.db.models import (
 )
 from app.db.seed import METIX_SUSPENSE_ACCOUNT_NUMBER
 from app.iso8583.codec import build_0200, build_0420, decode_raw_iso, encode_raw_iso
+from app.services.ledger import post_balanced_journal
 
 BCI_INDIVIDUAL = "00010012345678"  # Amélia Machel (500,000.00 MT balance, 200,000.00 MT daily cap)
+STDB_INDIVIDUAL = "00030055443322"  # Carlos Mondlane (400,000.00 MT balance, 200,000.00 MT cap)
 MPESA_WALLET = "258841234567"  # Rosa Sitoe (50,000.00 MT balance)
+EMOLA_WALLET = "258869876543"  # João Mabunda (35,000.00 MT balance)
 
 
 def test_iso8583_wire_codec_round_trip() -> None:
@@ -428,3 +431,217 @@ async def test_5_beneficiary_inoperative_de39_91_reverses_clearing_hold(
         ).scalar_one()
         assert orig.balance_centavos == 50_000_000
         assert suspense.balance_centavos == 0
+
+
+@pytest.mark.asyncio
+async def test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance(
+    clean_env: tuple[
+        httpx.AsyncClient,
+        async_sessionmaker[AsyncSession],
+        redis.Redis,
+        object,
+    ],
+) -> None:
+    """Scenario 6: Verify optimistic-lock retries, solvency under contention, and deadlock safety.
+
+    Part A: Fires 5 concurrent transfers with *distinct* idempotency keys from the same originator
+    when the balance can only cover 2 of them, verifying version CAS retries, zero overdraft,
+    DE 39 = 51 rejections, and released Redis daily quota.
+
+    Part B: Fires opposite-direction transfers (A -> B and B -> A simultaneously) both end-to-end
+    through SwitchEngine and directly via post_balanced_journal() behind an asyncio.Barrier,
+    proving deterministic UUID lock ordering eliminates PostgreSQL circular deadlocks.
+    """
+    client, session_factory, _, _ = clean_env
+
+    await client.post(
+        "/sim/beneficiary/chaos",
+        json={"preset": "normal", "latency_ms": 50, "drop_0210": False, "force_de39": None},
+    )
+
+    # --- Part A: 5x concurrent distinct transfers contending on a 25,000.00 MT balance ---
+    starting_balance = 2_500_000  # 25,000.00 MT (covers exactly 2 x 10,000.00 MT transfers)
+    transfer_amount = 1_000_000  # 10,000.00 MT each (5 x 10k = 50k MT << 200k MT daily cap)
+
+    async with session_factory() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.account_number == BCI_INDIVIDUAL)
+            .values(balance_centavos=starting_balance, version=1)
+        )
+        await session.commit()
+
+    responses = await asyncio.gather(
+        *(
+            client.post(
+                "/api/v1/transfers",
+                json={
+                    "idempotency_key": f"contention-{i}-{uuid.uuid4().hex}",
+                    "originator_account_number": BCI_INDIVIDUAL,
+                    "beneficiary_account_number": MPESA_WALLET,
+                    "amount_centavos": transfer_amount,
+                },
+            )
+            for i in range(5)
+        )
+    )
+
+    for resp in responses:
+        assert resp.status_code == 200
+        assert resp.json()["idempotent_replay"] is False
+
+    txs = [resp.json()["transaction"] for resp in responses]
+    assert len({tx["id"] for tx in txs}) == 5
+
+    completed = [tx for tx in txs if tx["status"] == TransactionStatus.COMPLETED.value]
+    declined = [tx for tx in txs if tx["status"] == TransactionStatus.DECLINED.value]
+    assert len(completed) == 2
+    assert len(declined) == 3
+
+    for tx in completed:
+        assert tx["response_code"] == "00"
+        assert {e["entry_type"] for e in tx["journal_entries"]} == {
+            JournalEntryType.CLEARING_HOLD.value,
+            JournalEntryType.SETTLEMENT.value,
+        }
+
+    for tx in declined:
+        assert tx["response_code"] == "51"
+        assert tx["journal_entries"] == []
+        assert any(m["mti"] == "0210" and m["response_code"] == "51" for m in tx["iso_messages"])
+
+    # Verify exact solvency (no overdraft), version increments, and released Redis daily quota
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Account).where(
+                    Account.account_number.in_(
+                        [BCI_INDIVIDUAL, MPESA_WALLET, METIX_SUSPENSE_ACCOUNT_NUMBER]
+                    )
+                )
+            )
+        ).scalars()
+        accts = {a.account_number: a for a in rows}
+        assert accts[BCI_INDIVIDUAL].balance_centavos == starting_balance - (2 * transfer_amount)
+        assert accts[BCI_INDIVIDUAL].version == 3  # 1 initial + 2 approved debits
+        assert accts[MPESA_WALLET].balance_centavos == 5_000_000 + (2 * transfer_amount)
+        assert accts[METIX_SUSPENSE_ACCOUNT_NUMBER].balance_centavos == 0
+
+    accounts_api = {a["account_number"]: a for a in (await client.get("/api/v1/accounts")).json()}
+    assert accounts_api[BCI_INDIVIDUAL]["daily_used_centavos"] == 2 * transfer_amount
+
+    # --- Part B1: Opposite-direction concurrent transfers end-to-end (STDB <-> EMOLA) ---
+    opposite_amount = 250_000  # 2,500.00 MT each
+    opposite_payloads = [
+        {
+            "idempotency_key": f"opp-ab-{i}-{uuid.uuid4().hex}",
+            "originator_account_number": STDB_INDIVIDUAL,
+            "beneficiary_account_number": EMOLA_WALLET,
+            "amount_centavos": opposite_amount,
+        }
+        for i in range(2)
+    ] + [
+        {
+            "idempotency_key": f"opp-ba-{i}-{uuid.uuid4().hex}",
+            "originator_account_number": EMOLA_WALLET,
+            "beneficiary_account_number": STDB_INDIVIDUAL,
+            "amount_centavos": opposite_amount,
+        }
+        for i in range(2)
+    ]
+
+    opp_responses = await asyncio.gather(
+        *(client.post("/api/v1/transfers", json=p) for p in opposite_payloads)
+    )
+    for resp in opp_responses:
+        assert resp.status_code == 200
+        tx = resp.json()["transaction"]
+        assert tx["status"] == TransactionStatus.COMPLETED.value
+        assert tx["response_code"] == "00"
+
+    # --- Part B2: Direct opposite-direction post_balanced_journal() deadlock stress ---
+    # Synchronize 4 independent DB sessions hitting (A -> B) and (B -> A) on the exact same pair
+    # simultaneously to verify deterministic UUID lock ordering prevents PostgreSQL 40P01 deadlocks.
+    direct_amount = 100_000  # 1,000.00 MT each
+    async with session_factory() as session:
+        stdb = (
+            await session.execute(select(Account).where(Account.account_number == STDB_INDIVIDUAL))
+        ).scalar_one()
+        emola = (
+            await session.execute(select(Account).where(Account.account_number == EMOLA_WALLET))
+        ).scalar_one()
+        assert stdb.balance_centavos == 40_000_000
+        assert emola.balance_centavos == 3_500_000
+        assert stdb.version == 5  # 1 initial + 2 debits + 2 credits from Part B1
+        assert emola.version == 5
+
+        direct_tx_pairs: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = []
+        now = datetime.now(UTC)
+        for idx, (debit_id, credit_id, orig_code, ben_code) in enumerate(
+            [
+                (stdb.id, emola.id, "STDB_MZ", "EMOLA_MZ"),
+                (emola.id, stdb.id, "EMOLA_MZ", "STDB_MZ"),
+                (stdb.id, emola.id, "STDB_MZ", "EMOLA_MZ"),
+                (emola.id, stdb.id, "EMOLA_MZ", "STDB_MZ"),
+            ]
+        ):
+            tx = SwitchTransaction(
+                idempotency_key=f"direct-deadlock-{idx}-{uuid.uuid4().hex}",
+                stan=f"99000{idx}",
+                rrn=f"63262099000{idx}",
+                transmission_datetime="1123120000",
+                originator_code=orig_code,
+                beneficiary_code=ben_code,
+                originator_account_id=debit_id,
+                beneficiary_account_id=credit_id,
+                amount_centavos=direct_amount,
+                currency="943",
+                status=TransactionStatus.COMPLETED.value,
+                response_code="00",
+                sla_deadline_at=now + timedelta(seconds=25),
+            )
+            session.add(tx)
+            await session.flush()
+            direct_tx_pairs.append((tx.id, debit_id, credit_id))
+        await session.commit()
+
+    barrier = asyncio.Barrier(len(direct_tx_pairs))
+
+    async def _post_direct(tx_id: uuid.UUID, debit_id: uuid.UUID, credit_id: uuid.UUID) -> None:
+        async with session_factory() as worker_session:
+            await barrier.wait()
+            await post_balanced_journal(
+                worker_session,
+                transaction_id=tx_id,
+                entry_type=JournalEntryType.SETTLEMENT,
+                description="Opposite-direction deadlock-avoidance stress posting",
+                debit_account_id=debit_id,
+                credit_account_id=credit_id,
+                amount_centavos=direct_amount,
+            )
+            await worker_session.commit()
+
+    await asyncio.gather(*(_post_direct(*pair) for pair in direct_tx_pairs))
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Account).where(
+                    Account.account_number.in_(
+                        [STDB_INDIVIDUAL, EMOLA_WALLET, METIX_SUSPENSE_ACCOUNT_NUMBER]
+                    )
+                )
+            )
+        ).scalars()
+        accts = {a.account_number: a for a in rows}
+        assert accts[STDB_INDIVIDUAL].balance_centavos == 40_000_000
+        assert accts[EMOLA_WALLET].balance_centavos == 3_500_000
+        assert accts[STDB_INDIVIDUAL].version == 9  # 5 + 4 opposite-direction postings
+        assert accts[EMOLA_WALLET].version == 9
+        assert accts[METIX_SUSPENSE_ACCOUNT_NUMBER].balance_centavos == 0
+
+    ledger = (await client.get("/api/v1/ledger")).json()
+    assert ledger["is_balanced"] is True
+    assert ledger["suspense_balance_centavos"] == 0
+    expected_volume = (2 * transfer_amount * 2) + (4 * opposite_amount * 2) + (4 * direct_amount)
+    assert ledger["total_debits_centavos"] == ledger["total_credits_centavos"] == expected_volume

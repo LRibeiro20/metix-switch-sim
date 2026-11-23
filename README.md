@@ -4,9 +4,9 @@
 
 [![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PostgreSQL 18](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis 7 Persistent](https://img.shields.io/badge/Redis-7%20(AOF%2BRDB)-DC382D?logo=redis&logoColor=white)](https://redis.io/)
-[![Next.js 16](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Meta Astryx](https://img.shields.io/badge/Design%20System-Meta%20Astryx-635BFF)](https://github.com/meta/astryx)
 
 ---
@@ -322,12 +322,13 @@ The Beneficiary PSP Simulator (`POST /sim/beneficiary/chaos`) and dashboard Chao
 | **`recon_hold`** | Drops `0210` AND drops `0430` reversal ACK | `0200 IN → 0200 OUT → (>25s) → 0420 OUT (no 0430)` | `68` | `RECON_HOLD` | Escalates from `REVERSAL_SENT → RECON_HOLD`. Funds remain safely ring-fenced in `METIX_SUSPENSE` awaiting manual ops reconciliation (never silently lost). | Held pending recon |
 | **Duplicate Retry Storm (`5×`)** | 5 concurrent `POST /api/v1/transfers` with identical `idempotency_key` | 1× canonical trace (`0200 → 0210`) | `00` | `COMPLETED` | **1 fresh execution + 4 Redis `SET NX` replays.** Originator debited exactly **once**; all 5 HTTP callers receive the identical transaction UUID & STAN. | Consumed **once** |
 | **Individual Cap Breach (`> 200k MT`)** | Cumulative CAT daily volume exceeds `200,000.00 MT` on `INDIVIDUAL` account | `0200 IN → 0210 OUT (61)` *(never routed)* | `61` | `DECLINED` | **0 journal entries** written; balance & optimistic lock `version` untouched. | Unchanged (Lua script aborts atomically) |
+| **Balance Contention (`5×` Distinct Keys)** | 5 concurrent distinct transfers (`10k MT` each) against a `25k MT` balance | `2× (0200 → 0210 00)` + `3× (0200 → 0210 51)` | `00` / `51` | `2 COMPLETED` / `3 DECLINED` | Savepoint CAS retries admit exactly 2 transfers; 3 abort with `InsufficientFundsError` (`0` postings, exact `5,000.00 MT` remainder, zero overdraft). | Consumed for `2`, **released** for `3` |
 
 ---
 
 ## 5. Core Engineering Invariants
 
-All invariants are codified in [GEMINI.md](GEMINI.md) and enforced at both database constraint and application layers:
+All invariants are codified in [INVARIANTS.md](INVARIANTS.md) and enforced at both database constraint and application layers:
 
 1. **Minor Units Only (ISO 4217 `943` MZN):** Every monetary column is PostgreSQL `BIGINT` (`balance_centavos`, `amount_centavos`) and Python `int` (`1.00 MT = 100 centavos`). Zero `float` arithmetic is used for money.
 2. **Double-Entry Clearing & Suspense Immutability:** `accounts.balance_centavos` is never mutated directly. Every balance movement calls `post_balanced_journal(...)`, writing one `journal_entries` header and two `journal_postings` rows where `SUM(DEBIT) == SUM(CREDIT)` inside a single PostgreSQL transaction.
@@ -382,17 +383,11 @@ The integration suite in [`backend/tests/test_switch_integration.py`](backend/te
 | 5 | `test_3_beneficiary_timeout_over_25s_sla_triggers_0420_reversal` | **`drop_0210` + >25s SLA Expiry** | Enables `drop_0210`, sends `12,000.00 MT`, confirms transaction holds in `ROUTED` with `12,000.00 MT` in `METIX_SUSPENSE`. Advances past 25s SLA deadline (`-26s`), invokes `SlaSweeper.sweep_once()`, and asserts `REVERSED`, `DE 39 = 68`, `0420` (42-char `DE 90`) + `0430` wire logs, no `0210` log, balanced `REVERSAL` entry, and **100% sender balance restoration** (`500,000.00 MT`) with `METIX_SUSPENSE == 0`. |
 | 6 | `test_4_individual_daily_limit_200k_mt_notice_1_gbm_2026` | **Notice 1/GBM/2026 Daily Cap** | Approves `150,000.00 MT` on `INDIVIDUAL` account (`COMPLETED`), then attempts `60,000.00 MT` (cumulative `210,000.00 MT > 200,000.00 MT`). Asserts second transfer is `DECLINED`, `DE 39 = 61`, outbound `0210` carries `61`, `journal_entries == []`, and balance reflects only the first transfer. |
 | 7 | `test_5_beneficiary_inoperative_de39_91_reverses_clearing_hold` | **`inoperative_91` (`DE 39 = 91`)** | Enables `inoperative_91`, sends `3,000.00 MT`, and asserts `DECLINED`, `DE 39 = 91`, balanced `CLEARING_HOLD` + `REVERSAL` postings, originator balance fully intact (`500,000.00 MT`), and `METIX_SUSPENSE == 0`. |
+| 8 | `test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance` | **5× Contention + Opposite-Direction `A ↔ B`** | Sets `BCI_MZ` balance to `25,000.00 MT` and fires 5 concurrent `10,000.00 MT` transfers with *distinct* `idempotency_key`s (`asyncio.gather`), asserting optimistic-lock CAS retries admit exactly **2** (`COMPLETED`, `DE 39 = 00`) and reject **3** (`DECLINED`, `DE 39 = 51`, `journal_entries == []`, released Redis daily quota) with exact `5,000.00 MT` remainder (`version == 3`). Then fires simultaneous opposite-direction transfers (`STDB_MZ ↔ EMOLA_MZ`) both end-to-end and directly via `post_balanced_journal()` behind an `asyncio.Barrier`, asserting zero PostgreSQL `40P01` deadlocks, exact version increments, net-zero balance delta, and global `is_balanced == True`. |
 
-Verified run output:
-```text
-tests/test_switch_integration.py::test_iso8583_wire_codec_round_trip PASSED                      [ 14%]
-tests/test_switch_integration.py::test_terminal_states_never_transition_backward PASSED          [ 28%]
-tests/test_switch_integration.py::test_1_happy_path_0200_to_0210_balanced_double_entry PASSED    [ 42%]
-tests/test_switch_integration.py::test_2_duplicate_retry_idempotency_single_execution PASSED     [ 57%]
-tests/test_switch_integration.py::test_3_beneficiary_timeout_over_25s_sla_triggers_0420_reversal PASSED [ 71%]
-tests/test_switch_integration.py::test_4_individual_daily_limit_200k_mt_notice_1_gbm_2026 PASSED [ 85%]
-tests/test_switch_integration.py::test_5_beneficiary_inoperative_de39_91_reverses_clearing_hold PASSED [100%]
-========================================= 7 passed in 1.42s ==========================================
+Run the full 8-test suite against live PostgreSQL 16 and Redis 7:
+```bash
+uv --directory backend run pytest -v
 ```
 
 ---
@@ -440,7 +435,7 @@ On startup (or via `POST /api/v1/seed`), the database idempotently seeds 5 insti
 ### Run the Full 5-Service Stack via Docker Compose
 
 ```bash
-git clone https://github.com/<your-username>/metix-switch-sim.git
+git clone https://github.com/LRibeiro20/metix-switch-sim.git
 cd metix-switch-sim
 docker compose up -d --build --wait
 ```
@@ -459,7 +454,7 @@ Once healthy:
 # 1. Start backing infrastructure (PostgreSQL 16 + Persistent Redis 7)
 docker compose up -d --wait postgres redis
 
-# 2. Sync Python 3.14 environment, lint, format-check, and run all 7 pytest tests
+# 2. Sync Python 3.14 environment, lint, format-check, and run all 8 pytest tests
 uv --directory backend sync --python 3.14
 uv --directory backend run ruff check .
 uv --directory backend run ruff format --check .
@@ -476,7 +471,7 @@ bun run --cwd frontend build
 
 ```text
 metix-switch-sim/
-├── GEMINI.md                              # Non-negotiable architectural & financial invariants
+├── INVARIANTS.md                          # Architectural, financial, ISO 8583 & SPIM SLA specification
 ├── docker-compose.yml                     # 5-service stack (postgres, persistent redis, switch-api, sla-sweeper, frontend)
 ├── docs/
 │   └── images/                            # Architecture diagrams & live dashboard screenshots
@@ -510,7 +505,7 @@ metix-switch-sim/
 │   │       └── sla_sweeper.py             # Dedicated 25s SPIM SLA reversal worker (0420/0430)
 │   └── tests/
 │       ├── conftest.py                    # Real PostgreSQL & Redis async test fixtures
-│       └── test_switch_integration.py     # 7 unit & integration tests (all 4 mandatory + DE 39=91)
+│       └── test_switch_integration.py     # 8 unit & integration tests (core flows, DE 39=91, lock contention & deadlocks)
 └── frontend/
     ├── Dockerfile                         # Multi-stage oven/bun Next.js production image
     ├── package.json                       # Next.js 15, React 19, @astryxdesign/core, Tailwind v4
