@@ -3,27 +3,41 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, AccountTier, Institution, InstitutionRole
+from app.db.models import (
+    Account,
+    AccountTier,
+    Institution,
+    InstitutionRole,
+    ParticipantLiquidityProfile,
+)
 
 METIX_SUSPENSE_ACCOUNT_NUMBER = "METIX-SUSPENSE-943"
+BM_RTGS_TREASURY_ACCOUNT_NUMBER = "BM-RTGS-TREASURY-943"
+
+SETTLEMENT_ACCOUNT_BY_INSTITUTION: dict[str, str] = {
+    "BCI_MZ": "SETTLE-BCI-943",
+    "STDB_MZ": "SETTLE-STDB-943",
+    "MPESA_MZ": "SETTLE-MPESA-943",
+    "EMOLA_MZ": "SETTLE-EMOLA-943",
+}
 
 SEED_INSTITUTIONS = [
     {
         "code": "METIX_SWITCH",
-        "name": "METIX / SIMOrede Central Switch",
+        "name": "METIX / SIMOrede Central Switch (Banco de Moçambique)",
         "role": InstitutionRole.SWITCH.value,
         "bic_code": "SIMOMZMA",
     },
     {
         "code": "BCI_MZ",
         "name": "Banco Comercial e de Investimentos",
-        "role": InstitutionRole.ORIGINATOR.value,
+        "role": InstitutionRole.PARTICIPANT.value,
         "bic_code": "CGDIMZMA",
     },
     {
         "code": "STDB_MZ",
         "name": "Standard Bank Moçambique",
-        "role": InstitutionRole.ORIGINATOR.value,
+        "role": InstitutionRole.PARTICIPANT.value,
         "bic_code": "SBICMZMX",
     },
     {
@@ -40,6 +54,8 @@ SEED_INSTITUTIONS = [
     },
 ]
 
+# Switch DB holds clearing suspense, central bank treasury, & participant settlement accounts.
+# Customer accounts live exclusively inside bci_cbs, stdb_cbs, and wallet-sim.
 SEED_ACCOUNTS = [
     {
         "institution_code": "METIX_SWITCH",
@@ -49,53 +65,78 @@ SEED_ACCOUNTS = [
         "balance_centavos": 0,
     },
     {
-        "institution_code": "BCI_MZ",
-        "account_number": "00010012345678",
-        "holder_name": "Amélia Machel (Individual)",
-        "account_tier": AccountTier.INDIVIDUAL.value,
-        "balance_centavos": 50_000_000,  # 500,000.00 MT
+        "institution_code": "METIX_SWITCH",
+        "account_number": BM_RTGS_TREASURY_ACCOUNT_NUMBER,
+        "holder_name": "Banco de Moçambique RTGS Liquidity Pool",
+        "account_tier": AccountTier.SUSPENSE.value,
+        "balance_centavos": 0,
     },
     {
         "institution_code": "BCI_MZ",
-        "account_number": "00010087654321",
-        "holder_name": "Maputo Logistics Lda (Business)",
-        "account_tier": AccountTier.BUSINESS.value,
-        "balance_centavos": 150_000_000,  # 1,500,000.00 MT
+        "account_number": "SETTLE-BCI-943",
+        "holder_name": "BCI Participant Settlement Account (SPIM)",
+        "account_tier": AccountTier.SETTLEMENT.value,
+        "balance_centavos": 500_000_000,  # 5,000,000.00 MT prefunded liquidity
     },
     {
         "institution_code": "STDB_MZ",
-        "account_number": "00030055443322",
-        "holder_name": "Carlos Mondlane (Individual)",
-        "account_tier": AccountTier.INDIVIDUAL.value,
-        "balance_centavos": 40_000_000,  # 400,000.00 MT
-    },
-    {
-        "institution_code": "STDB_MZ",
-        "account_number": "00030099887766",
-        "holder_name": "Beira Port Trading SA (Business)",
-        "account_tier": AccountTier.BUSINESS.value,
-        "balance_centavos": 200_000_000,  # 2,000,000.00 MT
+        "account_number": "SETTLE-STDB-943",
+        "holder_name": "Standard Bank Participant Settlement Account (SPIM)",
+        "account_tier": AccountTier.SETTLEMENT.value,
+        "balance_centavos": 500_000_000,  # 5,000,000.00 MT prefunded liquidity
     },
     {
         "institution_code": "MPESA_MZ",
-        "account_number": "258841234567",
-        "holder_name": "M-Pesa Wallet — Rosa Sitoe",
-        "account_tier": AccountTier.INDIVIDUAL.value,
-        "balance_centavos": 5_000_000,  # 50,000.00 MT
+        "account_number": "SETTLE-MPESA-943",
+        "holder_name": "Vodacom M-Pesa Clearing Settlement Account",
+        "account_tier": AccountTier.SETTLEMENT.value,
+        "balance_centavos": 100_000_000,  # 1,000,000.00 MT
     },
     {
         "institution_code": "EMOLA_MZ",
-        "account_number": "258869876543",
-        "holder_name": "e-Mola Wallet — João Mabunda",
-        "account_tier": AccountTier.INDIVIDUAL.value,
-        "balance_centavos": 3_500_000,  # 35,000.00 MT
+        "account_number": "SETTLE-EMOLA-943",
+        "holder_name": "Movitel e-Mola Clearing Settlement Account",
+        "account_tier": AccountTier.SETTLEMENT.value,
+        "balance_centavos": 100_000_000,  # 1,000,000.00 MT
+    },
+]
+
+SEED_LIQUIDITY_PROFILES = [
+    {
+        "institution_code": "BCI_MZ",
+        "prefunded_limit_centavos": 500_000_000,
+        "minimum_reserve_centavos": 50_000_000,  # 500,000.00 MT floor
+        "collateral_centavos": 250_000_000,
+        "net_debit_cap_centavos": 300_000_000,
+    },
+    {
+        "institution_code": "STDB_MZ",
+        "prefunded_limit_centavos": 500_000_000,
+        "minimum_reserve_centavos": 50_000_000,
+        "collateral_centavos": 250_000_000,
+        "net_debit_cap_centavos": 300_000_000,
+    },
+    {
+        "institution_code": "MPESA_MZ",
+        "prefunded_limit_centavos": 100_000_000,
+        "minimum_reserve_centavos": 10_000_000,
+        "collateral_centavos": 50_000_000,
+        "net_debit_cap_centavos": 75_000_000,
+    },
+    {
+        "institution_code": "EMOLA_MZ",
+        "prefunded_limit_centavos": 100_000_000,
+        "minimum_reserve_centavos": 10_000_000,
+        "collateral_centavos": 50_000_000,
+        "net_debit_cap_centavos": 75_000_000,
     },
 ]
 
 
 async def seed_database(session: AsyncSession) -> dict[str, int]:
-    """Idempotently seed Mozambican institutions and accounts."""
+    """Idempotently seed institutions, settlement/suspense accounts, and liquidity profiles."""
     inst_by_code: dict[str, Institution] = {}
+    acct_by_number: dict[str, Account] = {}
     created_institutions = 0
     created_accounts = 0
 
@@ -128,7 +169,32 @@ async def seed_database(session: AsyncSession) -> dict[str, int]:
                 version=1,
             )
             session.add(acct)
+            await session.flush()
             created_accounts += 1
+        acct_by_number[acct.account_number] = acct
+
+    for lp in SEED_LIQUIDITY_PROFILES:
+        code = str(lp["institution_code"])
+        existing_lp = (
+            await session.execute(
+                select(ParticipantLiquidityProfile).where(
+                    ParticipantLiquidityProfile.institution_code == code
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_lp is None:
+            settle_acct = acct_by_number[SETTLEMENT_ACCOUNT_BY_INSTITUTION[code]]
+            session.add(
+                ParticipantLiquidityProfile(
+                    institution_code=code,
+                    settlement_account_id=settle_acct.id,
+                    prefunded_limit_centavos=int(lp["prefunded_limit_centavos"]),
+                    minimum_reserve_centavos=int(lp["minimum_reserve_centavos"]),
+                    collateral_centavos=int(lp["collateral_centavos"]),
+                    net_debit_cap_centavos=int(lp["net_debit_cap_centavos"]),
+                    simulate_shortfall=False,
+                )
+            )
 
     await session.commit()
     return {

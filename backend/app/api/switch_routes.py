@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 
@@ -25,10 +25,11 @@ from app.db.models import (
     SwitchTransaction,
 )
 from app.db.seed import METIX_SUSPENSE_ACCOUNT_NUMBER, seed_database
-from app.iso8583.models import ISO_RESPONSE_DESCRIPTIONS
 from app.services.redis_guard import RedisGuard
 from app.services.switch_engine import SwitchEngine, TransferRequest, load_transaction_full
 from app.workers.sla_sweeper import SlaSweeper
+from shared.iso8583.models import ISO_RESPONSE_DESCRIPTIONS
+from shared.security import Principal, Role, get_optional_principal
 
 router = APIRouter(tags=["metix-switch"])
 
@@ -71,6 +72,9 @@ def _serialize_transaction(
         beneficiary_code=tx.beneficiary_code,
         originator_account_id=tx.originator_account_id,
         beneficiary_account_id=tx.beneficiary_account_id,
+        originator_account_number=tx.originator_account_number,
+        beneficiary_account_number=tx.beneficiary_account_number,
+        originator_hold_ref=tx.originator_hold_ref,
         amount_centavos=tx.amount_centavos,
         currency=tx.currency,
         status=tx.status,
@@ -80,6 +84,11 @@ def _serialize_transaction(
         ),
         auth_id=tx.auth_id,
         failure_reason=tx.failure_reason,
+        fraud_score=tx.fraud_score,
+        fraud_status=tx.fraud_status,
+        processing_latency_ms=tx.processing_latency_ms,
+        signature_verified=tx.signature_verified,
+        settlement_cycle_id=tx.settlement_cycle_id,
         sla_deadline_at=tx.sla_deadline_at,
         created_at=tx.created_at,
         updated_at=tx.updated_at,
@@ -93,6 +102,8 @@ def _serialize_transaction(
                 response_code=m.response_code,
                 payload_json=m.payload_json,
                 raw_iso_snippet=m.raw_iso_snippet,
+                signature_key_id=m.signature_key_id,
+                signature_verified=m.signature_verified,
                 created_at=m.created_at,
             )
             for m in tx.iso_messages
@@ -132,7 +143,24 @@ async def trigger_seed(request: Request) -> dict[str, int]:
 
 
 @router.post("/api/v1/transfers", response_model=TransferResponse)
-async def create_transfer(payload: TransferCreateRequest, request: Request) -> TransferResponse:
+async def create_transfer(
+    payload: TransferCreateRequest,
+    request: Request,
+    principal: Principal | None = Depends(get_optional_principal),
+) -> TransferResponse:
+    settings = request.app.state.settings
+    if settings.auth_enforce_transfers:
+        if principal is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="OAuth 2.0 Bearer token required to initiate interbank transfers",
+            )
+        if principal.role not in (Role.MAKER, Role.ADMIN, Role.SERVICE_ADAPTER):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"RBAC denied: role '{principal.role.value}' cannot initiate transfers",
+            )
+
     engine: SwitchEngine = request.app.state.switch_engine
     try:
         result = await engine.initiate_transfer(
@@ -143,6 +171,8 @@ async def create_transfer(payload: TransferCreateRequest, request: Request) -> T
                 amount_centavos=payload.amount_centavos,
                 stan=payload.stan,
                 rrn=payload.rrn,
+                actor_id=principal.subject if principal else "anonymous",
+                actor_role=principal.role.value if principal else "SYSTEM",
             )
         )
     except ValueError as exc:
@@ -159,6 +189,7 @@ async def create_transfer(payload: TransferCreateRequest, request: Request) -> T
 async def list_transactions(
     request: Request,
     limit: int = Query(default=40, ge=1, le=200),
+    status_filter: str | None = Query(default=None, alias="status"),
 ) -> list[TransactionOut]:
     account_lookup = await _load_account_lookup(request)
     async with request.app.state.session_factory() as session:
@@ -171,6 +202,8 @@ async def list_transactions(
             .order_by(SwitchTransaction.created_at.desc())
             .limit(limit)
         )
+        if status_filter:
+            stmt = stmt.where(SwitchTransaction.status == status_filter)
         txs = list((await session.execute(stmt)).scalars().all())
         return [_serialize_transaction(tx, account_lookup) for tx in txs]
 
@@ -188,6 +221,7 @@ async def get_transaction(transaction_id: uuid.UUID, request: Request) -> Transa
 
 @router.get("/api/v1/accounts", response_model=list[AccountOut])
 async def list_accounts(request: Request) -> list[AccountOut]:
+    """Return METIX Switch clearing suspense and participant settlement accounts."""
     guard = RedisGuard(request.app.state.redis, request.app.state.settings)
     async with request.app.state.session_factory() as session:
         rows = (
@@ -202,7 +236,6 @@ async def list_accounts(request: Request) -> list[AccountOut]:
 
     results: list[AccountOut] = []
     for acct, inst in rows:
-        used = await guard.get_daily_usage(acct.id)
         results.append(
             AccountOut(
                 id=acct.id,
@@ -217,7 +250,7 @@ async def list_accounts(request: Request) -> list[AccountOut]:
                 balance_centavos=acct.balance_centavos,
                 version=acct.version,
                 daily_limit_centavos=guard.daily_limit_for_tier(acct.account_tier),
-                daily_used_centavos=used,
+                daily_used_centavos=0,
                 updated_at=acct.updated_at,
             )
         )

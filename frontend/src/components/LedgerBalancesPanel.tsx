@@ -23,11 +23,11 @@ export function LedgerBalancesPanel({ accounts, ledger }: LedgerBalancesPanelPro
         <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
           <div>
             <Heading level={4} weight="semibold">
-              Live Institution Balances &amp; Notice No. 1/GBM/2026 Daily Caps
+              METIX Switch Clearing Suspense &amp; Participant Settlement Accounts
             </Heading>
             <Text type="supporting" display="block">
-              PostgreSQL integer centavos (BIGINT) with optimistic locking (version) and Redis CAT
-              daily counters
+              Switch-owned PostgreSQL settlement ledger (BIGINT centavos, optimistic locking) —
+              customer accounts live exclusively inside BCI &amp; Standard Bank CBS databases
             </Text>
           </div>
           <div className="flex items-center gap-2">

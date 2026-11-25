@@ -1,438 +1,239 @@
 # METIX-Switch (`metix-switch-sim`)
 
-**Fault-tolerant ISO 8583 & REST Instant Payment Switch simulator modeled on Mozambique’s METIX / SIMOrede infrastructure (Banco de Moçambique Notice No. 1/GBM/2026).**
+**Multi-service ISO 8583 & REST Interbank Instant Payment Switch, Independent Core Banking Simulators (BCI & Standard Bank), Multilateral Net Settlement, 3-Way Reconciliation, Fraud Monitoring, and Enterprise Security platform modeled on Mozambique’s METIX / SIMOrede infrastructure (Banco de Moçambique Notice No. 1/GBM/2026).**
 
 [![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![PostgreSQL 16 × 3](https://img.shields.io/badge/PostgreSQL-16%20(3%20Isolated%20DBs)-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Redis 7 Persistent](https://img.shields.io/badge/Redis-7%20(AOF%2BRDB)-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Security mTLS+OAuth2+Ed25519](https://img.shields.io/badge/Security-mTLS%20%C2%B7%20OAuth2%20%C2%B7%20Ed25519-09825D)](https://datatracker.ietf.org/doc/html/rfc8705)
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Meta Astryx](https://img.shields.io/badge/Design%20System-Meta%20Astryx-635BFF)](https://github.com/meta/astryx)
 
 ---
 
-## 1. The Problem It Solves & Regulatory Alignment
+## 1. Problem Domain & Regulatory Alignment
 
-In February 2026, **Banco de Moçambique** enacted **Notice No. 1/GBM/2026** (effective March 2, 2026), establishing the legal and operational framework for the **Mozambique Instant Payment System (SPIM / METIX)** under the National Payment System Law (Law No. 2/2008). Alongside the upgraded **SIMOrede** national switch—connecting commercial banks (`BCI`, `Standard Bank`, etc.) with E-Money Issuers (`M-Pesa`, `e-Mola`, `mKesh`)—cross-domain interoperable transfers in Mozambique grew from **244 transactions in 2022 to over 43 million annually**.
+In February 2026, **Banco de Moçambique** enacted **Notice No. 1/GBM/2026** (effective March 2, 2026), establishing the legal and operational framework for the **Mozambique Instant Payment System (SPIM / METIX)** under the National Payment System Law (Law No. 2/2008). Alongside the upgraded **SIMOrede** national switch—connecting commercial banks (`BCI`, `Standard Bank`) and E-Money Issuers (`M-Pesa`, `e-Mola`)—interoperable real-time transfers require strict isolation between participant core banking ledgers and the central clearing switch.
 
-Transitioning from overnight batch clearing (ACH) to **24/7/365 real-time instant settlement** creates four acute distributed-systems failure modes that core banking and fintech middleware teams must survive without losing a single centavo:
-
-| Real-World Payment Rail Problem | What Goes Wrong in Naive Implementations | How `metix-switch-sim` Solves It |
-| :--- | :--- | :--- |
-| **1. Timeout Ambiguity (25s SPIM SLA)** | Originator sends `0200`, beneficiary mobile wallet hangs or drops the `0210` ACK. Sender’s money vanishes into limbo or gets stuck indefinitely. | Two-leg **Clearing Suspense** accounting (`Originator → METIX_SUSPENSE`). A dedicated `sla-sweeper` worker detects `ROUTED` transfers exceeding `25s`, marks `TIMED_OUT` (`DE 39 = 68`), dispatches `MTI 0420` Reversal Advice (`DE 90`), and posts a balanced reversal restoring the sender’s exact balance. |
-| **2. Mobile Retry Storms (Double-Debit Risk)** | Unstable 3G/4G networks cause mobile clients or PSP gateways to retry the same payment 3–5× concurrently, debiting the customer multiple times. | Atomic **Redis `SET ... NX EX`** idempotency locks keyed on `idempotency_key` and `STAN + RRN`. Concurrent and sequential retries resolve to the exact original `switch_transactions` record with **1 ledger execution and 0 double-debits**. |
-| **3. Protocol Impedance Mismatch (ISO 8583 ↔ REST)** | Legacy core banking switches speak fixed/LLVAR **ISO 8583** wire frames (`MTI`, 128-bit hex bitmaps, `STAN`, `RRN`, `DE 39`), whereas modern PSP apps and wallets speak **JSON/REST**. | Canonical Pydantic v2 ISO 8583 codec translating REST transfer instructions into genuine ASCII wire frames (`0200`, `0210`, `0420`, `0430`) with 128-bit primary+secondary hex bitmaps, persisted alongside structured `JSONB` payloads in `iso8583_message_log`. |
-| **4. Regulatory Ceilings & Ledger Drift** | Floating-point rounding errors, direct `UPDATE accounts SET balance = ...` mutations, or non-atomic limit checks allow overdrafts, unbalanced books, or breaches of central bank daily caps. | Strict integer **centavos** (`BIGINT`, ISO 4217 `943` MZN), **optimistic locking** (`accounts.version`), immutable double-entry `journal_entries` + `journal_postings` (`SUM(DEBIT) == SUM(CREDIT)`), and atomic **Redis Lua** daily counters enforcing **200,000.00 MT** (`INDIVIDUAL`) and **500,000.00 MT** (`BUSINESS`) caps (`DE 39 = 61`). |
+| Real-World Interbank Payment Problem | How `metix-switch-sim` Solves It |
+| :--- | :--- |
+| **1. Bank Core Isolation (No Shared Customer DB)** | **BCI Core Banking (`bci-cbs` + `bci_cbs`)** and **Standard Bank Core Banking (`stdb-cbs` + `stdb_cbs`)** run as independent services with separate PostgreSQL 16 databases, Available vs. Ledger balances, earmark holds, internal double-entry GLs, and AES-256-GCM encrypted PII. **METIX Switch (`metix_switch`)** owns only clearing suspense and participant settlement accounts and talks to banks exclusively through **Bank Integration Adapters**. |
+| **2. Timeout Ambiguity (25s SPIM SLA)** | Originator CBS earmarks `available_balance` while Switch posts Leg 1 `CLEARING_HOLD` (`SETTLE-* → METIX-SUSPENSE-943`). If `0210` is dropped past `25s`, the `sla-sweeper` worker dispatches `MTI 0420` (`DE 90`), posts a balanced reversal, releases Redis daily quota, and releases the Originator CBS hold. |
+| **3. Mobile Retry Storms (Double-Debit Risk)** | Atomic **Redis `SET ... NX EX`** idempotency locks (`idempotency_key` + `STAN + RRN`) guarantee `5×` concurrent retry storms execute **once** across both Switch and CBS ledgers. |
+| **4. Multilateral Settlement & Liquidity Risk** | Live **Multilateral Net Settlement (MNS)** calculates zero-sum net debit/credit positions ($\sum \text{net} = 0$), verifies intraday liquidity/reserve floors, supports liquidity-shortfall failure simulation + BM RTGS top-ups, and generates **Ed25519-signed settlement reports**. |
+| **5. Inter-System Discrepancies & Suspense Float** | Automated **3-Way Financial Reconciliation** compares `metix_switch`, `bci_cbs`, and `stdb_cbs` to detect missing postings, orphans, duplicates, stale holds, and aged suspense—resolved strictly via **4-Eyes Maker-Checker** adjustments (`checker_id != maker_id`). |
+| **6. Real-Time Fraud & Enterprise Security** | Pre-route **Fraud Scoring (`0–100`)** (Redis velocity bursts, structuring, fan-out, rapid `A → B → A` round-trips) with Analyst Review Queue, backed by **strict X.509 mTLS**, **OAuth 2.0 + RBAC**, **Ed25519 payload signatures with nonce replay guards**, and a **SHA-256 hash-chained immutable audit log**. |
 
 ---
 
-## 2. Interactive Operator Dashboard Preview
+## 2. Live End-to-End Walkthrough Recordings & Dashboard Preview
 
-Built on Meta’s **Astryx Design System** (`@astryxdesign/core`, `@astryxdesign/theme-neutral`) with a Stripe-inspired light financial infrastructure workspace:
+### End-to-End Browser Verification Recordings
 
-### Switch Workbench & Real-Time ISO 8583 Wire Inspector
+Recorded live against the full 10-container mTLS Docker stack on `http://localhost:3000`:
+
+| Part | Walkthrough Covered | Video File |
+| :---: | :--- | :--- |
+| **Part 1** | Live mTLS Bank Connectivity (`BCI_MZ`, `STDB_MZ`, `MPESA_MZ`, `EMOLA_MZ`), Bidirectional `BCI ↔ Standard Bank` `0200 → 0210` Transfer, ISO 8583 Wire Inspector & `5×` Duplicate Retry Storm | [`docs/recordings/recording.mp4`](docs/recordings/recording.mp4) *(5.7 MB)* |
+| **Part 2** | Independent Core Banking Simulators (`bci_cbs` & `stdb_cbs` Available vs. Ledger balances, `AES-256-GCM PII`), Switch Double-Entry Ledger (`SUM(DR) == SUM(CR)`), Multilateral Net Settlement (`Σ Net = 0.00 MT`), Liquidity Shortfall Failure Simulation & Ed25519 Signed Report Verification | [`docs/recordings/recording_2.mp4`](docs/recordings/recording_2.mp4) *(11.0 MB)* |
+| **Part 3** | 3-Way Financial Reconciliation (`ORPHAN_CBS_POSTING` → `MISSING_IN_SWITCH`), 4-Eyes Maker-Checker Approval (`ops.maker` → `ops.checker`), Fraud Detection Round-Trip Review Queue & Analyst Release (`fraud.analyst`), mTLS X.509 PKI Inventory & SHA-256 Audit Chain Verification | [`docs/recordings/recording_3.mp4`](docs/recordings/recording_3.mp4) *(35.8 MB)* |
+
+<details>
+<summary><strong>Click to expand inline video players</strong></summary>
+
+#### Part 1 — Connectivity, Interbank Transfer & 5× Idempotency Storm
+<video src="docs/recordings/recording.mp4" controls width="100%"></video>
+
+#### Part 2 — Core Banking Simulators, Double-Entry Ledger & Multilateral Net Settlement
+<video src="docs/recordings/recording_2.mp4" controls width="100%"></video>
+
+#### Part 3 — 3-Way Reconciliation, Maker-Checker, Fraud Queue & SHA-256 Audit Chain
+<video src="docs/recordings/recording_3.mp4" controls width="100%"></video>
+
+</details>
+
+### Dashboard Screenshots
+
 ![Switch Workbench — Meta Astryx × Stripe UI with live ISO 8583 Wire Inspector](docs/images/dashboard_workbench.png)
-
-### Live Institution Balances, Notice No. 1/GBM/2026 Daily Caps & Double-Entry Journal
 ![Live Institution Balances, Notice No. 1/GBM/2026 Daily Caps, and Balanced Double-Entry Journal](docs/images/dashboard_ledger.png)
 
 ---
 
-## 3. System Architecture Design
-
-![METIX-Switch System Architecture & Fault-Tolerance Blueprint](docs/images/architecture_overview.svg)
-
-### 3.1 Layered Component & Network Architecture
-
-```mermaid
-flowchart TB
-    subgraph ClientPlane["Operator & Observability Plane (Port 3000)"]
-        UI["Next.js 15 + Meta Astryx UI<br/>Transfer Composer · Chaos Controls<br/>ISO 8583 Wire Inspector · Live Ledger"]
-    end
-
-    subgraph ControlPlane["METIX Switch Control Plane — switch-api (FastAPI, Port 8000)"]
-        API["REST API Layer<br/>/api/v1/transfers · /accounts · /ledger · /transactions"]
-        ENGINE["SwitchEngine Orchestrator<br/>State Machine Guard + Row Locking"]
-        GUARD["RedisGuard<br/>SET NX Idempotency · Lua Daily Caps · STAN Seq"]
-        CODEC["ISO 8583 Codec<br/>128-bit Hex Bitmap + Fixed/LLVAR Wire Framing"]
-        LEDGER["LedgerService<br/>Balanced Double-Entry + Optimistic Lock Retries"]
-    end
-
-    subgraph RecoveryPlane["Async Fault-Recovery Plane — sla-sweeper (Dedicated Worker)"]
-        SWEEP["SlaSweeper (1s Poll Loop)<br/>Phase A: SKIP LOCKED Claim<br/>Phase B: 0420 Dispatch + Reversal / RECON_HOLD"]
-    end
-
-    subgraph ChaosPlane["Beneficiary PSP / Wallet Chaos Simulator"]
-        BEN["MPESA_MZ & EMOLA_MZ Endpoint<br/>/sim/beneficiary/iso8583<br/>Latency · Drop 0210 · DE 39=91 · Fail 0430"]
-    end
-
-    subgraph DataPlane["Durable State Plane (Docker Persistent Volumes)"]
-        PG[("PostgreSQL 16 (metix_pgdata)<br/>accounts · switch_transactions<br/>journal_entries · journal_postings<br/>iso8583_message_log")]
-        RD[("Redis 7 Persistent (metix_redisdata)<br/>AOF everysec + RDB 60s<br/>Idempotency · CAT Daily Limits · Chaos Config")]
-    end
-
-    UI -- "REST JSON (1.5s zero-preflight polling)" --> API
-    API --> ENGINE
-    ENGINE --> GUARD
-    ENGINE --> CODEC
-    ENGINE --> LEDGER
-    GUARD -- "SET NX EX / Lua Eval / INCR" --> RD
-    LEDGER -- "Savepoint + Versioned UPDATE + Journals" --> PG
-    ENGINE -- "Persist 0200/0210 JSONB + Raw ASCII" --> PG
-    ENGINE -- "HTTP ISO 8583 0200 (25s timeout)" --> BEN
-    BEN -- "ISO 8583 0210 / 202 Drop / DE 39=91" --> ENGINE
-    BEN -- "Read metix:chaos:config" --> RD
-    SWEEP -- "Poll ROUTED past sla_deadline_at" --> PG
-    SWEEP -- "HTTP ISO 8583 0420 (DE 90)" --> BEN
-    BEN -- "ISO 8583 0430 (DE 39=00) / 202 Drop" --> SWEEP
-    SWEEP -- "Post REVERSAL Journal" --> PG
-    SWEEP -- "Lua Release Daily Quota" --> RD
-```
-
-### 3.2 Double-Entry Clearing & Suspense Money Flow
-
-Funds never teleport directly from Originator to Beneficiary while an external PSP network call is in flight. Instead, every routed payment clears through `METIX-SUSPENSE-943` in two immutable, balanced legs so money is strictly conserved at every millisecond—even during network drops or container crashes:
+## 3. Multi-Service System Architecture
 
 ```mermaid
 flowchart LR
-    ORIG["Originator Account<br/>BCI_MZ / STDB_MZ<br/>(Opening: 500,000.00 MT)"]
-    SUSP["METIX-SUSPENSE-943<br/>Central Clearing Account<br/>(Idle Balance: 0.00 MT)"]
-    BEN["Beneficiary Wallet<br/>MPESA_MZ / EMOLA_MZ<br/>(Opening: 50,000.00 MT)"]
-    RECON["RECON_HOLD Queue<br/>Manual Ops Escalation<br/>(Funds Ring-Fenced in Suspense)"]
+    UI["Banking Ops Dashboard<br/>Next.js 15 + Meta Astryx<br/>(Port 3000)"]
+    SW["METIX Central Switch<br/>switch-api (:8000)<br/>+ sla-sweeper"]
+    SWDB[("metix_switch<br/>PostgreSQL 16 (:5433)")]
+    RD[("Redis 7 Persistent (:6380)<br/>Idempotency · Daily Caps<br/>Velocity · Nonces · Circuit State")]
 
-    ORIG -- "Leg 1 · CLEARING_HOLD (ROUTED)<br/>DEBIT Originator / CREDIT Suspense" --> SUSP
-    SUSP -- "Leg 2 · SETTLEMENT (0210 DE 39=00)<br/>DEBIT Suspense / CREDIT Beneficiary" --> BEN
-    SUSP -- "REVERSAL (0210 DE 39=91 OR 0420/0430 DE 39=68)<br/>DEBIT Suspense / CREDIT Originator" --> ORIG
-    SUSP -. "0430 Dropped / Failed (fail_0430)<br/>Balance Safely Held Until Ops Resolution" .-> RECON
+    BCI["BCI Core Banking Sim<br/>bci-cbs (HTTPS mTLS :8444)"]
+    BCIDB[("bci_cbs<br/>PostgreSQL 16 (:5434)")]
+
+    STDB["Standard Bank CBS Sim<br/>stdb-cbs (HTTPS mTLS :8445)"]
+    STDBDB[("stdb_cbs<br/>PostgreSQL 16 (:5435)")]
+
+    WLT["Wallet Adapter Sim<br/>wallet-sim (HTTPS mTLS :8446)<br/>MPESA_MZ & EMOLA_MZ"]
+
+    UI -- "OAuth 2.0 Bearer JWT + RBAC" --> SW
+    SW --- SWDB
+    SW --- RD
+
+    SW -- "BciCoreBankingAdapter<br/>mTLS + OAuth2 + Ed25519" --> BCI
+    BCI --- BCIDB
+    BCI --- RD
+
+    SW -- "StandardBankCoreBankingAdapter<br/>mTLS + OAuth2 + Ed25519" --> STDB
+    STDB --- STDBDB
+    STDB --- RD
+
+    SW -- "MobileWalletAdapter<br/>mTLS + OAuth2 + Ed25519" --> WLT
+    WLT --- RD
 ```
 
-### 3.3 PostgreSQL Ledger & Audit Schema (`erDiagram`)
+### 3.1 Two-Tier Clearing & Core Banking Money Flow
 
-```mermaid
-erDiagram
-    institutions ||--o{ accounts : owns
-    accounts ||--o{ switch_transactions : originates
-    accounts ||--o{ switch_transactions : receives
-    accounts ||--o{ journal_postings : debited_or_credited
-    switch_transactions ||--o{ journal_entries : generates
-    journal_entries ||--|{ journal_postings : contains_balanced_pair
-    switch_transactions ||--o{ iso8583_message_log : traces
-
-    institutions {
-        uuid id PK
-        string code UK "BCI_MZ, STDB_MZ, MPESA_MZ, EMOLA_MZ, METIX_SWITCH"
-        string role "ORIGINATOR | BENEFICIARY | SWITCH"
-        string bic_code
-    }
-    accounts {
-        uuid id PK
-        uuid institution_id FK
-        string account_number UK
-        string account_tier "INDIVIDUAL | BUSINESS | SUSPENSE"
-        string currency "943 (CHECK)"
-        bigint balance_centavos "Integer minor units only"
-        int version "Optimistic lock counter"
-    }
-    switch_transactions {
-        uuid id PK
-        string idempotency_key UK
-        string stan "6-digit DE 11"
-        string rrn "12-char DE 37"
-        bigint amount_centavos
-        string status "Strict monotonic state machine"
-        string response_code "DE 39 (00, 51, 61, 68, 91)"
-        timestamptz sla_deadline_at "created_at + 25s"
-    }
-    journal_entries {
-        uuid id PK
-        uuid transaction_id FK
-        string entry_type "CLEARING_HOLD | SETTLEMENT | REVERSAL"
-        string description
-    }
-    journal_postings {
-        uuid id PK
-        uuid journal_entry_id FK
-        uuid account_id FK
-        string direction "DEBIT | CREDIT"
-        bigint amount_centavos "CHECK > 0; SUM(DR)==SUM(CR)"
-    }
-    iso8583_message_log {
-        uuid id PK
-        uuid transaction_id FK
-        string mti "0200 | 0210 | 0420 | 0430"
-        string direction "INBOUND | OUTBOUND"
-        jsonb payload_json "Structured DE 2..103"
-        text raw_iso_snippet "ASCII MTI + 128-bit Hex Bitmap + Fields"
-    }
-```
-
-### 3.4 Persistent Redis 7 Key Space
-
-Redis runs with `--appendonly yes --appendfsync everysec --save 60 1` backed by Docker volume `metix_redisdata:/data`:
-
-| Redis Key Pattern | Data Type / Command | TTL | Responsibility |
-| :--- | :--- | :--- | :--- |
-| `metix:idemp:lock:{idempotency_key}` | `SET ... NX EX` | `86,400s` (24h) | Atomic winner-takes-all concurrency lock preventing duplicate execution |
-| `metix:idemp:tx:{idempotency_key}` | `SET ... EX` | `86,400s` (24h) | Maps `idempotency_key` → canonical `switch_transactions.id` for concurrent followers |
-| `metix:idemp:stanrrn:{stan}:{rrn}` | `SET ... NX EX` | `86,400s` (24h) | Secondary protocol-level idempotency guard on ISO 8583 `STAN + RRN` |
-| `metix:daily_limit:{account_id}:{YYYY-MM-DD}` | Atomic Lua (`INCRBY` / clamped decrement) | `172,800s` (48h) | Enforces Notice No. 1/GBM/2026 CAT daily cap (`20M` Individual / `50M` Business centavos) |
-| `metix:seq:stan` | `INCR` (`% 1_000_000`) | Persistent | Monotonically sequenced 6-digit ISO 8583 STAN generator |
-| `metix:chaos:config` | JSON string | Persistent | Shared live chaos preset read by `switch-api`, `beneficiary-sim`, and `sla-sweeper` |
-
----
-
-## 4. Under the Hood: Fault Tolerance & Chaos Mechanics
-
-![Under the Hood: Chaos Engineering & Fault-Tolerance Pipelines](docs/images/chaos_fault_tolerance_flow.svg)
-
-### 4.1 How Concurrent Duplicate Retry Storms Are Absorbed (`5×` Simultaneous Requests)
-
-When an unstable mobile network fires 5 identical `POST /api/v1/transfers` requests at the exact same millisecond, **only 1 caller acquires the Redis `SET NX` lock**; the other 4 never touch the ledger or call the beneficiary PSP:
+Customer accounts never live in the Switch database. Instead, every interbank transfer coordinates **Available vs. Ledger balances** in the participant CBS databases alongside **Participant Settlement & Suspense** double-entry legs in `metix_switch`:
 
 ```mermaid
 sequenceDiagram
-    participant C1 as Caller #1 (Winner)
-    participant C2 as Callers #2–#5 (Duplicates)
-    participant RD as Redis 7 (SET NX)
-    participant PG as PostgreSQL 16 (Ledger)
-    participant Ben as Beneficiary PSP
+    participant Op as Ops / Originator
+    participant SW as METIX Switch (metix_switch)
+    participant BCI as BCI CBS (bci_cbs)
+    participant STDB as Standard Bank CBS (stdb_cbs)
 
-    par Simultaneous Retry Storm (same idempotency_key)
-        C1->>RD: SET metix:idemp:lock:{key} token NX EX 86400
-        C2->>RD: SET metix:idemp:lock:{key} token NX EX 86400
+    Op->>SW: POST /api/v1/transfers (OAuth 2.0 Bearer JWT)
+    SW->>SW: Redis SET NX Idempotency + Fraud Scoring + Notice 1/GBM/2026 Daily Cap
+    SW->>BCI: POST /cbs/v1/debits/authorize (mTLS + OAuth2 + Ed25519)
+    BCI-->>SW: Approved (available_balance -= amt, ledger unchanged, hold_ref created)
+    SW->>SW: Leg 1 CLEARING_HOLD: DEBIT SETTLE-BCI-943 -> CREDIT METIX-SUSPENSE-943 (status=ROUTED)
+    SW->>STDB: POST /cbs/v1/iso8583 MTI 0200 (mTLS + OAuth2 + Ed25519)
+    alt Beneficiary Approves (DE 39 = 00)
+        STDB-->>SW: MTI 0210 DE 39=00 (available & ledger += amt via internal CBS GL)
+        SW->>SW: Leg 2 SETTLEMENT: DEBIT METIX-SUSPENSE-943 -> CREDIT SETTLE-STDB-943 (COMPLETED)
+        SW->>BCI: POST /cbs/v1/debits/capture (ledger_balance -= amt, hold=CAPTURED)
+    else Beneficiary Declines (DE 39 = 91/62) or >25s SLA Timeout (0420/0430 DE 39 = 68)
+        SW->>SW: REVERSAL: DEBIT METIX-SUSPENSE-943 -> CREDIT SETTLE-BCI-943 (DECLINED / REVERSED)
+        SW->>BCI: POST /cbs/v1/debits/release (available_balance += amt, hold=RELEASED)
     end
-
-    RD-->>C1: OK (Lock Acquired)
-    RD-->>C2: nil (Already Locked)
-
-    C1->>PG: Create SwitchTransaction + Leg 1 CLEARING_HOLD (COMMIT)
-    C1->>RD: SET metix:idemp:tx:{key} {tx_id}
-
-    loop Poll every 50ms (up to 3s) until tx_id bound
-        C2->>RD: GET metix:idemp:tx:{key}
-    end
-    RD-->>C2: {tx_id}
-    C2->>PG: SELECT SwitchTransaction WHERE id = {tx_id}
-    C2-->>C2: Return 200 OK (idempotent_replay=true, 0 debits)
-
-    C1->>Ben: Dispatch single ISO 8583 0200
-    Ben-->>C1: ISO 8583 0210 (DE 39=00)
-    C1->>PG: Leg 2 SETTLEMENT (COMPLETED)
-    C1-->>C1: Return 200 OK (idempotent_replay=false, 1 debit)
 ```
 
-### 4.2 How Dropped `0210` ACKs, 25s SPIM SLA Timeouts & Late `0210` Races Work
+### 3.2 Strict Transaction State Machine (`switch_transactions.status`)
 
-When `drop_0210` chaos is active (or a beneficiary PSP stalls beyond 25 seconds), the switch splits timeout recovery into **two isolated database transactions** so database row locks are never held across external HTTP calls:
-
-```mermaid
-sequenceDiagram
-    participant Orig as Originator PSP
-    participant Switch as SwitchEngine (switch-api)
-    participant PG as PostgreSQL 16
-    participant Sweeper as SlaSweeper (sla-sweeper)
-    participant Ben as Beneficiary PSP (drop_0210)
-    participant RD as Redis 7
-
-    Orig->>Switch: POST /api/v1/transfers
-    Switch->>PG: Leg 1 CLEARING_HOLD (Originator -> METIX_SUSPENSE), status=ROUTED, sla_deadline_at=T+25s
-    Switch->>Ben: ISO 8583 0200
-    Ben-->>Switch: 202 Dropped ACK (or 25s HTTP read timeout)
-    Switch-->>Orig: 200 OK (status=ROUTED, funds held in Suspense)
-
-    Note over Sweeper,PG: 25 seconds elapse -> NOW() >= sla_deadline_at
-
-    rect rgb(254, 243, 199)
-        Note over Sweeper,PG: Phase A — Atomic Claim (No Network I/O Held)
-        Sweeper->>PG: SELECT ... WHERE status='ROUTED' AND sla_deadline_at <= NOW() FOR UPDATE SKIP LOCKED
-        Sweeper->>PG: Transition ROUTED -> TIMED_OUT (DE 39=68) -> REVERSAL_SENT + Log 0420 (DE 90) + COMMIT
-    end
-
-    rect rgb(235, 245, 255)
-        Note over Sweeper,Ben: Phase B — Reversal Advice Dispatch & Finalization
-        Sweeper->>Ben: ISO 8583 MTI 0420 (DE 39=68, DE 90 Original Data Elements)
-        alt Beneficiary Returns 0430 (DE 39=00)
-            Ben-->>Sweeper: ISO 8583 MTI 0430 (DE 39=00)
-            Sweeper->>PG: SELECT ... FOR UPDATE -> Log 0430 -> Post REVERSAL (Suspense -> Originator) -> REVERSED
-            Sweeper->>RD: Lua _RELEASE_DAILY_LIMIT_LUA (restore daily cap)
-        else 0430 Dropped / Failed (recon_hold chaos)
-            Ben-->>Sweeper: 202 Dropped / Timeout
-            Sweeper->>PG: SELECT ... FOR UPDATE -> Transition REVERSAL_SENT -> RECON_HOLD
-        end
-    end
-
-    Note over Switch,PG: Late 0210 Race Guard: If a delayed 0210 arrives now,<br/>SwitchEngine locks the row (FOR UPDATE), sees status != ROUTED,<br/>logs the late 0210 for audit, and REFUSES to credit Beneficiary.
-```
-
-### 4.3 Deadlock-Free Optimistic Locking in the Ledger
-
-High-throughput payment switches experience heavy contention on shared accounts (especially `METIX-SUSPENSE-943` and high-volume corporate originator accounts). `backend/app/services/ledger.py` prevents both **lost balance updates** and **circular row-lock deadlocks**:
-
-1. **Nested Savepoint (`BEGIN NESTED`):** Each retry attempt executes inside a PostgreSQL savepoint with `populate_existing=True` so stale ORM cache values are never trusted.
-2. **Pre-Debit Solvency Check:** Non-suspense accounts verify `balance_centavos >= amount_centavos`; shortfalls abort immediately with `InsufficientFundsError` (`DE 39 = 51`) and release the Redis daily limit.
-3. **Deterministic UUID Lock Ordering:** The debit account and credit account updates are sorted by `account.id` (`UUID`) before executing SQL `UPDATE`, making opposite-direction deadlocks mathematically impossible.
-4. **Compare-and-Swap Version Check:**
-   ```sql
-   UPDATE accounts
-   SET balance_centavos = balance_centavos + :delta,
-       version = version + 1,
-       updated_at = NOW()
-   WHERE id = :account_id
-     AND version = :expected_version;
-   ```
-   If `rowcount != 1` (a concurrent transaction modified the account first), the savepoint rolls back cleanly and retries (up to 5 attempts) before raising `OptimisticLockError`.
-
-### 4.4 Crash Recovery & Failure-Point Guarantees
-
-| Failure Point | What Happens Under the Hood | Financial State Guarantee |
-| :--- | :--- | :--- |
-| **`switch-api` crashes before Leg 1 commits** | PostgreSQL rolls back the open transaction. The `except` block deletes `metix:idemp:lock:{key}` and runs `_RELEASE_DAILY_LIMIT_LUA`. | **Zero debit**, daily cap restored, client can safely retry with the same key. |
-| **`switch-api` crashes after `ROUTED` commits (before `0200` reaches beneficiary)** | `SwitchTransaction` is durably persisted in PostgreSQL as `ROUTED` with `sla_deadline_at = T + 25s` and funds in `METIX_SUSPENSE`. | Within 25s, `sla-sweeper` automatically claims the row, sends `0420`, and restores 100% of sender funds. |
-| **Multiple `sla-sweeper` replicas run simultaneously** | Phase A queries `FOR UPDATE SKIP LOCKED` and commits `REVERSAL_SENT` before making HTTP calls. | **Zero duplicate `0420` reversals**; each expired row is claimed by exactly one worker. |
-| **Beneficiary drops both `0210` and `0430` (`recon_hold`)** | Sweeper transitions `REVERSAL_SENT → RECON_HOLD` instead of blindly crediting the sender (since beneficiary settlement state is unknown). | Funds stay auditable and ring-fenced in `METIX_SUSPENSE` for operations reconciliation. |
-| **Redis container restarts (`docker restart metix-redis`)** | Redis replays `/data/appendonlydir` (`AOF everysec`) + RDB snapshot from volume `metix_redisdata`. | Idempotency keys, daily CAT limits, STAN counter, and chaos config survive intact. |
-
-### 4.5 Strict Transaction State Machine (`switch_transactions.status`)
-
-Terminal states (`COMPLETED`, `DECLINED`, `REVERSED`, `RECON_HOLD`) are mathematically monotonic—attempting any backward or illegal transition raises `InvalidStateTransitionError`.
+Terminal states (`COMPLETED`, `DECLINED`, `REVERSED`, `RECON_HOLD`) are strictly absorbing (`InvalidStateTransitionError` on any backward transition):
 
 ```mermaid
 stateDiagram-v2
     [*] --> INITIATED
-    INITIATED --> DECLINED: Daily limit exceeded (DE 39=61) / Insufficient funds (DE 39=51)
-    INITIATED --> ROUTED: Leg 1 CLEARING_HOLD posted (Originator -> METIX_SUSPENSE)
-    ROUTED --> COMPLETED: 0210 DE 39=00 (Leg 2 SETTLEMENT: Suspense -> Beneficiary)
-    ROUTED --> DECLINED: 0210 DE 39!=00 e.g. 91 (REVERSAL: Suspense -> Originator)
+    INITIATED --> INITIATED: Fraud Score 50-79 (PENDING_REVIEW Queue)
+    INITIATED --> DECLINED: Fraud Block (59) / Daily Cap (61) / CBS Restriction (62) / NSF (51)
+    INITIATED --> ROUTED: CBS Hold + Leg 1 CLEARING_HOLD (SETTLE-ORIG -> METIX-SUSPENSE-943)
+    ROUTED --> COMPLETED: 0210 DE 39=00 (Leg 2 SETTLEMENT + CBS Hold Capture)
+    ROUTED --> DECLINED: 0210 DE 39!=00 (Switch REVERSAL + CBS Hold Release)
     ROUTED --> TIMED_OUT: >25s SPIM SLA expired (DE 39=68)
     TIMED_OUT --> REVERSAL_SENT: 0420 Reversal Advice dispatched (DE 90)
-    REVERSAL_SENT --> REVERSED: 0430 DE 39=00 (REVERSAL: Suspense -> Originator)
-    REVERSAL_SENT --> RECON_HOLD: 0430 failed / dropped (manual recon required)
+    REVERSAL_SENT --> REVERSED: 0430 DE 39=00 (Switch REVERSAL + CBS Hold Release)
+    REVERSAL_SENT --> RECON_HOLD: 0430 dropped/failed (Suspense ring-fenced -> Maker-Checker Recon)
 ```
-
-### 4.6 Chaos Engineering Matrix
-
-The Beneficiary PSP Simulator (`POST /sim/beneficiary/chaos`) and dashboard Chaos Controls inject faults globally or scoped to a single wallet (`MPESA_MZ` or `EMOLA_MZ`):
-
-| Chaos / Stress Scenario | Injected Fault | Wire Trace Sequence | `DE 39` | Final State | Double-Entry Ledger & Balances | Redis Daily Quota |
-| :--- | :--- | :--- | :---: | :--- | :--- | :--- |
-| **`normal`** *(default)* | `200ms` latency, `drop_0210=false` | `0200 IN → 0200 OUT → 0210 IN → 0210 OUT` | `00` | `COMPLETED` | 2 balanced entries (`CLEARING_HOLD` + `SETTLEMENT`). Originator `-amt`, Beneficiary `+amt`, Suspense `0.00 MT`. | Consumed (`+amt`) |
-| **`slow_15s`** | `15,000ms` latency (< 25s SLA) | `0200 IN → 0200 OUT → (15s) → 0210 IN → 0210 OUT` | `00` | `COMPLETED` | Funds sit in `METIX_SUSPENSE` during the 15s wait, then settle cleanly before the 25s SLA deadline expires. | Consumed (`+amt`) |
-| **`drop_0210`** | Beneficiary accepts `0200` & drops `0210` ACK | `0200 IN → 0200 OUT → (>25s) → 0420 OUT → 0430 IN` | `68` | `REVERSED` | Stays `ROUTED` (funds in Suspense) until `sla_deadline_at`. `sla-sweeper` posts `REVERSAL` restoring 100% of sender’s balance; Suspense returns to `0.00 MT`. | Reserved then **released** (`-amt`) |
-| **`inoperative_91`** | Beneficiary returns `DE 39 = 91` | `0200 IN → 0200 OUT → 0210 IN (91) → 0210 OUT (91)` | `91` | `DECLINED` | `CLEARING_HOLD` immediately offset by balanced `REVERSAL`. Sender balance unchanged; Suspense `0.00 MT`. | Reserved then **released** (`-amt`) |
-| **`recon_hold`** | Drops `0210` AND drops `0430` reversal ACK | `0200 IN → 0200 OUT → (>25s) → 0420 OUT (no 0430)` | `68` | `RECON_HOLD` | Escalates from `REVERSAL_SENT → RECON_HOLD`. Funds remain safely ring-fenced in `METIX_SUSPENSE` awaiting manual ops reconciliation (never silently lost). | Held pending recon |
-| **Duplicate Retry Storm (`5×`)** | 5 concurrent `POST /api/v1/transfers` with identical `idempotency_key` | 1× canonical trace (`0200 → 0210`) | `00` | `COMPLETED` | **1 fresh execution + 4 Redis `SET NX` replays.** Originator debited exactly **once**; all 5 HTTP callers receive the identical transaction UUID & STAN. | Consumed **once** |
-| **Individual Cap Breach (`> 200k MT`)** | Cumulative CAT daily volume exceeds `200,000.00 MT` on `INDIVIDUAL` account | `0200 IN → 0210 OUT (61)` *(never routed)* | `61` | `DECLINED` | **0 journal entries** written; balance & optimistic lock `version` untouched. | Unchanged (Lua script aborts atomically) |
-| **Balance Contention (`5×` Distinct Keys)** | 5 concurrent distinct transfers (`10k MT` each) against a `25k MT` balance | `2× (0200 → 0210 00)` + `3× (0200 → 0210 51)` | `00` / `51` | `2 COMPLETED` / `3 DECLINED` | Savepoint CAS retries admit exactly 2 transfers; 3 abort with `InsufficientFundsError` (`0` postings, exact `5,000.00 MT` remainder, zero overdraft). | Consumed for `2`, **released** for `3` |
 
 ---
 
-## 5. Core Engineering Invariants
+## 4. Enterprise Capabilities Overview
 
-All invariants are codified in [INVARIANTS.md](INVARIANTS.md) and enforced at both database constraint and application layers:
+### 4.1 Independent Core Banking Simulators (`backend/cbs/`)
+- Two completely separate FastAPI services (`bci-cbs`, `stdb-cbs`) with separate PostgreSQL 16 databases (`bci_cbs`, `stdb_cbs`).
+- **Available vs. Ledger Balances**: outbound authorizations decrement `available_balance_centavos` and create a `cbs_holds` earmark; `ledger_balance_centavos` only decrements on `capture` via balanced internal GL postings (`cbs_journal_entries` / `cbs_journal_postings`).
+- **Account Restrictions & Limits**: enforces `ACTIVE`, `PND` (Post No Debit), `PNC` (Post No Credit), `FROZEN`, `CLOSED` (`DE 39 = 62`), plus per-transaction and daily CBS limits (`DE 39 = 61`).
+- **Encrypted PII at Rest**: `cbs_accounts.holder_name_enc` stores **AES-256-GCM** authenticated ciphertext (`enc:v1:<nonce>:<ciphertext>`) alongside HMAC-SHA256 blind indexes and masked display names.
 
-1. **Minor Units Only (ISO 4217 `943` MZN):** Every monetary column is PostgreSQL `BIGINT` (`balance_centavos`, `amount_centavos`) and Python `int` (`1.00 MT = 100 centavos`). Zero `float` arithmetic is used for money.
-2. **Double-Entry Clearing & Suspense Immutability:** `accounts.balance_centavos` is never mutated directly. Every balance movement calls `post_balanced_journal(...)`, writing one `journal_entries` header and two `journal_postings` rows where `SUM(DEBIT) == SUM(CREDIT)` inside a single PostgreSQL transaction.
-3. **Optimistic Locking (`accounts.version`):** Every balance update checks and increments `version` (`WHERE id = :id AND version = :expected_version`) in deterministic UUID order.
-4. **Deterministic Redis Idempotency (`SET NX EX`):** Keyed on `idempotency_key` and `STAN + RRN`, preventing double-debits under concurrent retry storms.
-5. **Notice No. 1/GBM/2026 Daily Limits (CAT `Africa/Maputo`):** Atomic Redis Lua scripts cap daily outbound volume at **`200,000.00 MT`** (`INDIVIDUAL`) and **`500,000.00 MT`** (`BUSINESS`), returning **`DE 39 = 61`** on breach without touching the ledger.
-6. **Persistent Backing Stores:** PostgreSQL (`metix_pgdata`) and Redis (`metix_redisdata`, AOF `everysec` + RDB) preserve state across container restarts.
+### 4.2 Interbank Clearing & Multilateral Net Settlement (`backend/app/services/settlement.py`)
+- Computes live multilateral net positions across `BCI_MZ`, `STDB_MZ`, `MPESA_MZ`, and `EMOLA_MZ` proving $\sum \text{net\_position\_centavos} = 0$.
+- Tracks participant settlement balances, minimum reserve floors, collateral, and net debit caps (`participant_liquidity_profiles`).
+- Supports **Settlement Failure Simulation** (liquidity shortfall → `FAILED` cycle + `CRITICAL` system alert), **BM RTGS Liquidity Top-Up** (balanced double-entry journal from `BM-RTGS-TREASURY-943`), and **Ed25519-signed Settlement Reports** with live signature verification.
+
+### 4.3 3-Way Financial Reconciliation & 4-Eyes Maker-Checker (`reconciliation.py`, `maker_checker.py`)
+- Pulls live transactions from `metix_switch`, `bci_cbs`, and `stdb_cbs` to classify:
+  - `MISSING_IN_CBS`, `MISSING_IN_SWITCH`, `DUPLICATE_POSTING`, `INCOMPLETE_TRANSFER`, `AMOUNT_OR_STATUS_MISMATCH`, and `SUSPENSE_AGING`.
+- Includes a controlled fault injector (`ORPHAN_CBS_POSTING`, `DUPLICATE_CBS_POSTING`, `STALE_ACTIVE_HOLD`) for deterministic testing.
+- **4-Eyes Maker-Checker (`maker_checker_requests`)**: enforces `checker_id != maker_id` at both API and PostgreSQL `CHECK` constraint levels for reconciliation adjustments, CBS account restrictions, and liquidity top-ups.
+
+### 4.4 Fraud Detection & Transaction Monitoring (`backend/app/services/fraud.py`)
+- Deterministic real-time pre-route scoring (`0–100`) backed by Redis sorted sets:
+  - **1-minute & 10-minute velocity bursts** (`VELOCITY_1M_BURST`, `VELOCITY_10M_SUSTAINED`)
+  - **Beneficiary fan-out** (`FAN_OUT_BENEFICIARIES`)
+  - **Rapid round-trip layering** (`RAPID_ROUND_TRIP_LAYERING` — `A → B` then `B → A` within 5 minutes for `≥ 5,000 MT`)
+  - **Structuring near Notice No. 1/GBM/2026 daily cap** (`STRUCTURING_NEAR_REGULATORY_CAP`)
+- Score `50–79` routes to the **Fraud Review Queue** (`PENDING_REVIEW`); score `≥ 80` auto-blocks (`DE 39 = 59`). Analysts (`FRAUD_ANALYST`) can **Release** or **Confirm Fraud** with a full `FraudInvestigationEvent` audit trail.
+
+### 4.5 Enterprise Security (`backend/shared/pki.py`, `security.py`, `app/services/audit.py`)
+- **Mutual TLS (mTLS)**: `pki-init` generates `METIX-SIMOREDE-ROOT-CA` and per-service X.509 certificates (`switch-api`, `bci-cbs`, `stdb-cbs`, `wallet-sim`) with SKI/AKI extensions passing strict OpenSSL 3 / Python 3.14 `VERIFY_X509_STRICT` mutual verification.
+- **OAuth 2.0 & RBAC**: `POST /oauth/token` (`password` and `client_credentials` grants) issuing HS256 JWTs with scopes and role enforcement (`OPS_VIEWER`, `MAKER`, `CHECKER`, `FRAUD_ANALYST`, `ADMIN`, `SERVICE_ADAPTER`).
+- **Ed25519 Digital Signatures**: every inter-service request carries `X-Signature-Alg: Ed25519`, `X-Key-Id`, `X-Timestamp`, `X-Nonce`, and `X-Payload-Signature` verified with `±300s` skew window and Redis `SET NX` nonce replay protection.
+- **Immutable Hash-Chained Audit Log**: append-only `audit_logs` where each row commits `entry_hash = SHA-256(seq | actor | role | action | resource | canonical_payload | prev_hash)`, verified via `POST /api/v1/security/audit-logs/verify`.
 
 ---
 
-## 6. ISO 8583 Wire Specification
+## 5. Seeded Accounts & OAuth 2.0 Operator Personas
 
-Every inbound and outbound frame is logged to `iso8583_message_log` in both structured `JSONB` (`payload_json`) and packed ASCII wire format (`raw_iso_snippet`):
+### Switch Settlement & Suspense Accounts (`metix_switch` on `:5433`)
+| Institution | Account Number | Tier | Opening Balance |
+| :--- | :--- | :--- | ---: |
+| `METIX_SWITCH` | `METIX-SUSPENSE-943` | `SUSPENSE` | `0.00 MT` |
+| `METIX_SWITCH` | `BM-RTGS-TREASURY-943` | `SUSPENSE` | `0.00 MT` |
+| `BCI_MZ` | `SETTLE-BCI-943` | `SETTLEMENT` | `5,000,000.00 MT` |
+| `STDB_MZ` | `SETTLE-STDB-943` | `SETTLEMENT` | `5,000,000.00 MT` |
+| `MPESA_MZ` | `SETTLE-MPESA-943` | `SETTLEMENT` | `1,000,000.00 MT` |
+| `EMOLA_MZ` | `SETTLE-EMOLA-943` | `SETTLEMENT` | `1,000,000.00 MT` |
 
-```text
-0200 F2200000080080000000000006000000 1400010012345678 280000 000000500000 ...
-│    │                                │                │      └─ DE 4: 5,000.00 MT (12-digit centavos)
-│    │                                │                └─ DE 3: Processing Code (280000 P2P Instant)
-│    │                                └─ DE 2: LLVAR (len 14) Originator Account
-│    └─ 128-bit Primary + Secondary Hex Bitmap (Bit 1 set because DE 102/103 > 64)
-└─ MTI 0200 (Financial Request)
-```
+### Independent Core Banking & Wallet Customer Accounts
+| Database / Service | Bank | Account Number | Holder (AES-256-GCM Encrypted in CBS) | Tier | Opening Balance |
+| :--- | :--- | :--- | :--- | :--- | ---: |
+| `bci_cbs` (`:5434`) | `BCI_MZ` | `00010012345678` | Amélia Machel | `INDIVIDUAL` | `500,000.00 MT` |
+| `bci_cbs` (`:5434`) | `BCI_MZ` | `00010087654321` | Maputo Logistics Lda | `BUSINESS` | `1,500,000.00 MT` |
+| `bci_cbs` (`:5434`) | `BCI_MZ` | `00010055001122` | Fátima Guebuza | `INDIVIDUAL` | `300,000.00 MT` |
+| `stdb_cbs` (`:5435`) | `STDB_MZ` | `00030055443322` | Carlos Mondlane | `INDIVIDUAL` | `400,000.00 MT` |
+| `stdb_cbs` (`:5435`) | `STDB_MZ` | `00030099887766` | Beira Port Trading SA | `BUSINESS` | `2,000,000.00 MT` |
+| `stdb_cbs` (`:5435`) | `STDB_MZ` | `00030077112233` | Eduardo Chissano | `INDIVIDUAL` | `250,000.00 MT` |
+| `wallet-sim` (`:8446`) | `MPESA_MZ` | `258841234567` | M-Pesa Wallet — Rosa Sitoe | `INDIVIDUAL` | `50,000.00 MT` |
+| `wallet-sim` (`:8446`) | `EMOLA_MZ` | `258869876543` | e-Mola Wallet — João Mabunda | `INDIVIDUAL` | `35,000.00 MT` |
 
-| Data Element | Format | Required On | Purpose in METIX / SIMOrede |
+### Built-in OAuth 2.0 Operator Personas (Header Persona Switcher)
+| Username | Password | Role | Capabilities |
 | :--- | :--- | :--- | :--- |
-| **MTI** | 4-char fixed | All | `0200` Request · `0210` Response · `0420` Reversal Advice · `0430` Reversal Response |
-| **DE 2** | LLVAR (6–19) | All | Originator PAN / Account Identifier |
-| **DE 3** | 6-digit fixed | All | `280000` (Instant P2P Transfer) · `280020` (Reversal) |
-| **DE 4** | 12-digit fixed | All | Transaction Amount in integer **centavos** (zero-padded, e.g. `000000500000` = `5,000.00 MT`) |
-| **DE 7** | 10-digit fixed | All | UTC Transmission Date & Time (`MMDDhhmmss`) |
-| **DE 11** | 6-digit fixed | All | Systems Trace Audit Number (`STAN`, monotonically sequenced via Redis) |
-| **DE 37** | 12-char fixed | All | Retrieval Reference Number (`RRN`, format `YDDDHH + STAN`) |
-| **DE 38** | 6-char fixed | `0210` (`00`) | Authorization Identification Response (6-char alphanumeric) |
-| **DE 39** | 2-char fixed | `0210`, `0420`, `0430` | Response Code: `00` Approved · `51` Insufficient Funds · `61` Exceeds Daily Cap · `68` 25s SLA Timeout · `91` Issuer Inoperative |
-| **DE 49** | 3-char fixed | All | Currency Code strictly validated as **`943`** (MZN — Mozambican Metical) |
-| **DE 90** | 42-char fixed | `0420`, `0430` | Original Data Elements (`orig_mti(4) + orig_stan(6) + orig_de7(10) + acquirer(11) + forwarding(11)`) |
-| **DE 102** | LLVAR | All | Originator Account ID (`INSTITUTION_CODE:ACCOUNT_NUMBER`) |
-| **DE 103** | LLVAR | All | Beneficiary Account ID (`INSTITUTION_CODE:ACCOUNT_NUMBER`) |
+| `sec.admin` | `admin-mz-2026` | `ADMIN` | Full operations, chaos controls, direct restrictions/top-ups, audit inspection |
+| `ops.maker` | `maker-mz-2026` | `MAKER` | Initiate transfers, run MNS cycles & recon, propose 4-eyes adjustments/restrictions |
+| `ops.checker` | `checker-mz-2026` | `CHECKER` | Approve/reject Maker-Checker 4-eyes requests (`maker_id != checker_id`) |
+| `fraud.analyst` | `fraud-mz-2026` | `FRAUD_ANALYST` | Review Fraud Queue cases, Release or Confirm Fraud (`DE 39 = 59`), ack alerts |
+| `ops.viewer` | `viewer-mz-2026` | `OPS_VIEWER` | Read-only monitoring & audit chain verification (`403` on mutating endpoints) |
 
 ---
 
-## 7. Automated Test Suite (`pytest`) — What Every Test Verifies
+## 6. Automated Test Suite (`12 / 12` Passing)
 
-The integration suite in [`backend/tests/test_switch_integration.py`](backend/tests/test_switch_integration.py) executes against **real PostgreSQL 16 and Redis 7 instances** (truncating & re-seeding DB tables and flushing Redis DB `1` per test for deterministic isolation):
+Executed against all **3 isolated PostgreSQL 16 containers** and **Redis 7** with real OAuth 2.0 JWTs, Ed25519 digital signatures, and X.509 PKI validation:
 
-| # | Test Name | Chaos / Condition | Exact Assertions Verified |
-| :---: | :--- | :--- | :--- |
-| 1 | `test_iso8583_wire_codec_round_trip` | Unit — Protocol Codec | Encodes `0200` and `0420` (with 42-char `DE 90`) into ASCII wire frames with 128-bit hex bitmaps and asserts lossless round-trip via `decode_raw_iso(...)`. |
-| 2 | `test_terminal_states_never_transition_backward` | Unit — State Machine | Verifies `COMPLETED`, `DECLINED`, `REVERSED`, and `RECON_HOLD` all raise `InvalidStateTransitionError` on any attempted transition. |
-| 3 | `test_1_happy_path_0200_to_0210_balanced_double_entry` | `normal` (`10ms`) | Sends `7,500.00 MT` (`BCI_MZ → MPESA_MZ`). Asserts `COMPLETED`, `DE 39 = 00`, 6-char `auth_id`, 4 wire logs (`0200`/`0210` IN+OUT, `DE 49 = 943`), 2 balanced entries (`CLEARING_HOLD` + `SETTLEMENT`), exact final centavo balances, `METIX_SUSPENSE == 0`, incremented lock versions (`v2`/`v3`), and global ledger `is_balanced == True`. |
-| 4 | `test_2_duplicate_retry_idempotency_single_execution` | **5× Concurrent Storm + 1 Sequential Retry** | Fires 5 simultaneous `POST /api/v1/transfers` (`asyncio.gather`) + 1 follow-up request with identical `idempotency_key`. Asserts all 6 return the **exact same transaction ID**, `fresh_count == 1`, `idempotent_replay == True` on duplicates, and originator is debited **exactly once**. |
-| 5 | `test_3_beneficiary_timeout_over_25s_sla_triggers_0420_reversal` | **`drop_0210` + >25s SLA Expiry** | Enables `drop_0210`, sends `12,000.00 MT`, confirms transaction holds in `ROUTED` with `12,000.00 MT` in `METIX_SUSPENSE`. Advances past 25s SLA deadline (`-26s`), invokes `SlaSweeper.sweep_once()`, and asserts `REVERSED`, `DE 39 = 68`, `0420` (42-char `DE 90`) + `0430` wire logs, no `0210` log, balanced `REVERSAL` entry, and **100% sender balance restoration** (`500,000.00 MT`) with `METIX_SUSPENSE == 0`. |
-| 6 | `test_4_individual_daily_limit_200k_mt_notice_1_gbm_2026` | **Notice 1/GBM/2026 Daily Cap** | Approves `150,000.00 MT` on `INDIVIDUAL` account (`COMPLETED`), then attempts `60,000.00 MT` (cumulative `210,000.00 MT > 200,000.00 MT`). Asserts second transfer is `DECLINED`, `DE 39 = 61`, outbound `0210` carries `61`, `journal_entries == []`, and balance reflects only the first transfer. |
-| 7 | `test_5_beneficiary_inoperative_de39_91_reverses_clearing_hold` | **`inoperative_91` (`DE 39 = 91`)** | Enables `inoperative_91`, sends `3,000.00 MT`, and asserts `DECLINED`, `DE 39 = 91`, balanced `CLEARING_HOLD` + `REVERSAL` postings, originator balance fully intact (`500,000.00 MT`), and `METIX_SUSPENSE == 0`. |
-| 8 | `test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance` | **5× Contention + Opposite-Direction `A ↔ B`** | Sets `BCI_MZ` balance to `25,000.00 MT` and fires 5 concurrent `10,000.00 MT` transfers with *distinct* `idempotency_key`s (`asyncio.gather`), asserting optimistic-lock CAS retries admit exactly **2** (`COMPLETED`, `DE 39 = 00`) and reject **3** (`DECLINED`, `DE 39 = 51`, `journal_entries == []`, released Redis daily quota) with exact `5,000.00 MT` remainder (`version == 3`). Then fires simultaneous opposite-direction transfers (`STDB_MZ ↔ EMOLA_MZ`) both end-to-end and directly via `post_balanced_journal()` behind an `asyncio.Barrier`, asserting zero PostgreSQL `40P01` deadlocks, exact version increments, net-zero balance delta, and global `is_balanced == True`. |
-
-Run the full 8-test suite against live PostgreSQL 16 and Redis 7:
-```bash
-uv --directory backend run pytest -v
-```
-
----
-
-## 8. Seeded Mozambican Institutions & Accounts
-
-On startup (or via `POST /api/v1/seed`), the database idempotently seeds 5 institutions and 7 accounts:
-
-| Institution | Role | BIC | Account Number | Account Holder | Tier | Daily Cap | Opening Balance |
-| :--- | :--- | :--- | :--- | :--- | :--- | ---: | ---: |
-| `METIX_SWITCH` | `SWITCH` | `SIMOMZMA` | `METIX-SUSPENSE-943` | METIX Clearing Suspense (MZN) | `SUSPENSE` | — | `0.00 MT` |
-| `BCI_MZ` | `ORIGINATOR` | `CGDIMZMA` | `00010012345678` | Amélia Machel (Individual) | `INDIVIDUAL` | `200,000.00 MT` | `500,000.00 MT` |
-| `BCI_MZ` | `ORIGINATOR` | `CGDIMZMA` | `00010087654321` | Maputo Logistics Lda (Business) | `BUSINESS` | `500,000.00 MT` | `1,500,000.00 MT` |
-| `STDB_MZ` | `ORIGINATOR` | `SBICMZMX` | `00030055443322` | Carlos Mondlane (Individual) | `INDIVIDUAL` | `200,000.00 MT` | `400,000.00 MT` |
-| `STDB_MZ` | `ORIGINATOR` | `SBICMZMX` | `00030099887766` | Beira Port Trading SA (Business) | `BUSINESS` | `500,000.00 MT` | `2,000,000.00 MT` |
-| `MPESA_MZ` | `BENEFICIARY` | `MPESMZMA` | `258841234567` | M-Pesa Wallet — Rosa Sitoe | `INDIVIDUAL` | — | `50,000.00 MT` |
-| `EMOLA_MZ` | `BENEFICIARY` | `EMOLMZMA` | `258869876543` | e-Mola Wallet — João Mabunda | `INDIVIDUAL` | — | `35,000.00 MT` |
+- **[`backend/tests/test_switch_integration.py`](backend/tests/test_switch_integration.py)** *(8 tests)*:
+  1. `test_iso8583_wire_codec_round_trip` — `0200` / `0420` 128-bit bitmap ASCII round-trip.
+  2. `test_terminal_states_never_transition_backward` — strict monotonic state machine enforcement.
+  3. `test_1_happy_path_bidirectional_cbs_and_wallet_settlement` — `BCI ↔ STDB` and `BCI → M-Pesa` across isolated DBs, verifying CBS hold capture & balanced Switch settlement journals.
+  4. `test_2_duplicate_retry_idempotency_single_execution` — `5×` concurrent + sequential retry storm with single CBS debit and single Switch execution.
+  5. `test_3_beneficiary_timeout_over_25s_sla_releases_cbs_hold_and_reverses` — dropped `0210` leaves `available < ledger` in `bci_cbs`; `>25s` SLA `0420/0430` reverses Switch suspense and releases the BCI hold.
+  6. `test_4_individual_daily_limit_and_cbs_account_restrictions` — `200,000 MT` Notice No. 1/GBM/2026 cap (`DE 39 = 61`) + CBS `PND` account restriction (`DE 39 = 62`).
+  7. `test_5_beneficiary_inoperative_de39_91_reverses_and_releases_hold` — `DE 39 = 91` decline reverses Switch clearing hold & releases BCI hold.
+  8. `test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance` — `5×` concurrent distinct transfers exceeding BCI available balance (zero overdraft, `DE 39 = 51`) + opposite-direction deadlock safety.
+- **[`backend/tests/test_enterprise_features.py`](backend/tests/test_enterprise_features.py)** *(4 tests)*:
+  9. `test_settlement_mns_zero_sum_failure_simulation_and_signed_report` — MNS zero-sum netting, liquidity shortfall simulation (`FAILED`), BM RTGS top-up, successful retry, and Ed25519 report signature verification.
+  10. `test_three_way_reconciliation_and_maker_checker_four_eyes` — detects `RECON_HOLD`, `MISSING_IN_SWITCH`, `SUSPENSE_AGING`; blocks Maker & Admin self-approval (`403`); Checker approves & clears suspense.
+  11. `test_fraud_round_trip_review_queue_and_velocity_burst` — rapid `A → B → A` round-trip queued in `PENDING_REVIEW` and released by `fraud.analyst`, plus 8-tx/60s velocity burst detection.
+  12. `test_enterprise_security_mtls_oauth_rbac_signatures_encryption_and_audit_chain` — X.509 CA chain verification, OAuth 2.0 `401`/`403` RBAC, Ed25519 tamper & replay nonce rejection against `bci-cbs`, AES-256-GCM ciphertext check in `bci_cbs`, and SHA-256 `audit_logs` chain verification + DB tamper detection.
 
 ---
 
-## 9. API Reference
+## 7. Quickstart & Connecting Databases in pgAdmin 4
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/health` | Verifies live PostgreSQL 16 and Redis 7 connectivity |
-| `POST` | `/api/v1/transfers` | Originator PSP initiates an instant transfer (`0200`) with Redis idempotency & daily limit checks |
-| `GET` | `/api/v1/transactions` | Lists recent `switch_transactions` with nested ISO 8583 message traces and journal postings |
-| `GET` | `/api/v1/transactions/{id}` | Full transaction detail, decoded wire frames, and double-entry postings |
-| `GET` | `/api/v1/accounts` | Live account balances, optimistic lock `version`, and Notice No. 1/GBM/2026 Redis daily usage |
-| `GET` | `/api/v1/ledger` | Global double-entry integrity check (`SUM(DEBIT) == SUM(CREDIT)`), suspense float, and journal log |
-| `POST` | `/api/v1/sweeper/run` | Manually triggers one immediate 25s SPIM SLA sweep cycle |
-| `POST` | `/api/v1/seed` | Idempotently seeds institutions and sample accounts |
-| `GET` / `POST` | `/sim/beneficiary/chaos` | Reads or updates live chaos controls (`normal`, `slow_15s`, `drop_0210`, `inoperative_91`, `recon_hold`) |
-| `POST` | `/sim/beneficiary/iso8583` | Beneficiary PSP ISO 8583 receiver (`0200 → 0210` and `0420 → 0430`) |
-
----
-
-## 10. Quickstart
-
-### Prerequisites
-* **Docker** & **Docker Compose**
-* **Python 3.14+** with [`uv`](https://docs.astral.sh/uv/) (for local backend lint & pytest runs)
-* **[`bun`](https://bun.sh/)** (for local frontend development & builds)
-
-### Run the Full 5-Service Stack via Docker Compose
+### Start the Full 10-Container mTLS Stack
 
 ```bash
 git clone https://github.com/LRibeiro20/metix-switch-sim.git
@@ -441,77 +242,91 @@ docker compose up -d --build --wait
 ```
 
 Once healthy:
-* **Interactive Dashboard (Meta Astryx × Stripe UI):** http://localhost:3000
-* **FastAPI Switch & OpenAPI Swagger Docs:** http://localhost:8000/docs
-* **PostgreSQL 16 (host port):** `localhost:5433` (user `metix`, db `metix_switch`, volume `metix_pgdata`)
-* **Persistent Redis 7 (host port):** `localhost:6380` (`AOF + RDB`, volume `metix_redisdata`)
+- **Banking Operations Dashboard:** http://localhost:3000
+- **METIX Switch API & OpenAPI Docs:** http://localhost:8000/docs
+- **BCI Core Banking Simulator (mTLS):** `https://localhost:8444`
+- **Standard Bank Core Banking Simulator (mTLS):** `https://localhost:8445`
+- **Mobile Wallet Adapter Simulator (mTLS):** `https://localhost:8446`
 
-> Host ports `5433` and `6380` are intentionally mapped off defaults (`5432`/`6379`) to avoid colliding with local PostgreSQL/Redis installations while keeping standard internal Docker DNS (`postgres:5432`, `redis:6379`).
+### Connecting All 3 PostgreSQL 16 Databases in pgAdmin 4 Desktop
 
-### Local Verification & Development Commands
+Register 3 separate servers in **pgAdmin 4** (*Servers → Register → Server...*):
+
+| Server Name | Host | Port | Database | Username | Password |
+| :--- | :--- | :---: | :--- | :--- | :--- |
+| **METIX Switch DB** | `localhost` | `5433` | `metix_switch` | `metix` | `metix_secret` |
+| **BCI Core Banking DB** | `localhost` | `5434` | `bci_cbs` | `bci_user` | `bci_secret` |
+| **Standard Bank Core Banking DB** | `localhost` | `5435` | `stdb_cbs` | `stdb_user` | `stdb_secret` |
+
+### Local Lint, Test & Frontend Build Commands
 
 ```bash
-# 1. Start backing infrastructure (PostgreSQL 16 + Persistent Redis 7)
-docker compose up -d --wait postgres redis
+# 1. Start the 3 isolated PostgreSQL 16 databases + Redis 7
+docker compose up -d --wait postgres bci-postgres stdb-postgres redis
 
-# 2. Sync Python 3.14 environment, lint, format-check, and run all 8 pytest tests
+# 2. Sync Python 3.14 environment, lint, format-check, and run all 12 tests
 uv --directory backend sync --python 3.14
 uv --directory backend run ruff check .
 uv --directory backend run ruff format --check .
 uv --directory backend run pytest -v
 
-# 3. Install & build Next.js + Astryx frontend with Bun
+# 3. Build Next.js + Astryx Operations Dashboard
 bun install --cwd frontend
 bun run --cwd frontend build
 ```
 
 ---
 
-## 11. Repository Structure
+## 8. API Surface Summary
+
+| Domain | Key Endpoints |
+| :--- | :--- |
+| **Switch & ISO 8583** | `GET /health`, `POST /api/v1/transfers`, `GET /api/v1/transactions`, `GET /api/v1/accounts`, `GET /api/v1/ledger`, `POST /api/v1/sweeper/run` |
+| **Core Banking Adapters** | `GET /api/v1/banks/connectivity`, `GET /api/v1/banks/accounts`, `POST /api/v1/banks/{code}/accounts/{acct}/restrictions`, `GET/POST /api/v1/banks/{code}/chaos` |
+| **Clearing & Settlement** | `GET /api/v1/settlement/positions`, `GET /api/v1/settlement/cycles`, `POST /api/v1/settlement/cycles/run`, `POST /api/v1/settlement/simulate-shortfall`, `POST /api/v1/settlement/liquidity/topup`, `GET /api/v1/settlement/cycles/{id}/report` |
+| **3-Way Reconciliation** | `POST /api/v1/reconciliation/run`, `GET /api/v1/reconciliation/exceptions`, `GET /api/v1/reconciliation/suspense`, `POST /api/v1/reconciliation/exceptions/{id}/adjust`, `POST /api/v1/reconciliation/inject-fault` |
+| **Fraud & Risk Queue** | `GET /api/v1/fraud/cases`, `POST /api/v1/fraud/cases/{id}/decision` |
+| **Enterprise Security** | `POST /oauth/token`, `GET /api/v1/security/me`, `GET /api/v1/security/status`, `GET /api/v1/security/audit-logs`, `POST /api/v1/security/audit-logs/verify`, `GET /api/v1/security/maker-checker`, `POST /api/v1/security/maker-checker/{id}/decide` |
+| **Ops Telemetry & Alerts** | `GET /api/v1/ops/telemetry`, `GET /api/v1/ops/alerts`, `POST /api/v1/ops/alerts/{id}/ack` |
+
+---
+
+## 9. Repository Structure
 
 ```text
 metix-switch-sim/
-├── INVARIANTS.md                          # Architectural, financial, ISO 8583 & SPIM SLA specification
-├── docker-compose.yml                     # 5-service stack (postgres, persistent redis, switch-api, sla-sweeper, frontend)
+├── INVARIANTS.md                          # Financial, ISO 8583, concurrency & SPIM SLA invariants
+├── docker-compose.yml                     # 10-container mTLS stack (3× PG16, Redis, PKI, BCI/STDB CBS, Wallet, Switch, Sweeper, UI)
 ├── docs/
-│   └── images/                            # Architecture diagrams & live dashboard screenshots
-│       ├── architecture_overview.svg
-│       ├── chaos_fault_tolerance_flow.svg
-│       ├── dashboard_workbench.png
-│       └── dashboard_ledger.png
+│   ├── images/                            # Architecture SVGs & dashboard screenshots
+│   └── recordings/                        # Live E2E walkthrough recordings (recording.mp4, recording_2.mp4, recording_3.mp4)
 ├── backend/
-│   ├── Dockerfile                         # Python 3.14 + uv container image
-│   ├── pyproject.toml                     # Dependencies, ruff & pytest-asyncio config
-│   ├── app/
-│   │   ├── config.py                      # Settings (25s SLA, 200k/500k MT caps, CAT timezone)
-│   │   ├── main.py                        # FastAPI lifespan, CORS, router mounts
-│   │   ├── db/
-│   │   │   ├── models.py                  # SQLAlchemy 2.x ledger, ISO log & strict state machine
-│   │   │   ├── session.py                 # Async engine & session factory
-│   │   │   └── seed.py                    # Idempotent Mozambican PSP & wallet seed data
-│   │   ├── iso8583/
-│   │   │   ├── models.py                  # Canonical Pydantic v2 ISO 8583 message schema
-│   │   │   └── codec.py                   # 128-bit bitmap ASCII encoder/decoder & builders
-│   │   ├── services/
-│   │   │   ├── ledger.py                  # Optimistic-locked balanced double-entry engine
-│   │   │   ├── redis_guard.py             # Atomic SET NX idempotency & Lua daily limit scripts
-│   │   │   ├── chaos.py                   # Shared Redis chaos configuration store
-│   │   │   └── switch_engine.py           # Central METIX router & 0200/0210 orchestration
-│   │   ├── api/
-│   │   │   ├── schemas.py                 # Pydantic response/request DTOs
-│   │   │   ├── switch_routes.py           # Switch REST API & ledger/account telemetry
-│   │   │   └── beneficiary_sim.py         # MPESA_MZ / EMOLA_MZ chaos simulator
-│   │   └── workers/
-│   │       └── sla_sweeper.py             # Dedicated 25s SPIM SLA reversal worker (0420/0430)
+│   ├── Dockerfile                         # Python 3.14 + uv multi-service image
+│   ├── pyproject.toml                     # FastAPI, SQLAlchemy 2, Redis, cryptography, PyJWT, ruff, pytest
+│   ├── shared/
+│   │   ├── pki.py                         # X.509 Root CA & per-service mTLS PKI (SKI/AKI)
+│   │   ├── security.py                    # OAuth 2.0 JWT, RBAC, Ed25519 signing/replay guard, AES-256-GCM PII encryptor
+│   │   ├── schemas.py                     # Canonical CBS <-> Switch integration DTOs
+│   │   └── iso8583/                       # Shared ISO 8583 128-bit bitmap codec & models
+│   ├── cbs/                               # Independent Core Banking Simulator (deployed for BCI_MZ & STDB_MZ)
+│   │   ├── db/                            # Isolated CBS models (cbs_accounts, cbs_holds, cbs_transactions, cbs_journals)
+│   │   ├── services/core_engine.py        # Available vs. Ledger earmark/capture/release & internal GL engine
+│   │   └── api/routes.py                  # Signed mTLS/OAuth2 CBS endpoints
+│   ├── wallet_sim/                        # Isolated Mobile Wallet Adapter Simulator (MPESA_MZ / EMOLA_MZ)
+│   ├── app/                               # METIX Central Switch
+│   │   ├── adapters/                      # BciCoreBankingAdapter, StandardBankCoreBankingAdapter, MobileWalletAdapter, AdapterRegistry
+│   │   ├── db/                            # Switch settlement/suspense, settlement cycles, recon, fraud, maker-checker, audit models
+│   │   ├── services/                      # switch_engine, ledger, redis_guard, settlement, reconciliation, maker_checker, fraud, audit, telemetry
+│   │   ├── api/                           # switch_routes, auth_routes, ops_routes, schemas
+│   │   └── workers/sla_sweeper.py         # Dedicated 25s SPIM SLA reversal worker (0420/0430 + CBS hold release)
 │   └── tests/
-│       ├── conftest.py                    # Real PostgreSQL & Redis async test fixtures
-│       └── test_switch_integration.py     # 8 unit & integration tests (core flows, DE 39=91, lock contention & deadlocks)
+│       ├── conftest.py                    # 3-DB isolated async fixtures + ASGI/OAuth2/Ed25519 harness
+│       ├── test_switch_integration.py     # 8 core ISO 8583, CBS hold/capture, SLA, limit & concurrency tests
+│       └── test_enterprise_features.py    # 4 MNS settlement, 3-way recon/4-eyes, fraud & enterprise security tests
 └── frontend/
-    ├── Dockerfile                         # Multi-stage oven/bun Next.js production image
-    ├── package.json                       # Next.js 15, React 19, @astryxdesign/core, Tailwind v4
     └── src/
-        ├── app/                           # App Router layout, page, Astryx + Stripe CSS tokens
-        ├── lib/                           # Typed API client & centavo/MZN formatting utilities
-        └── components/                    # SwitchDashboard, TransferComposer, ChaosControlPanel,
-                                           # IsoWireInspector, LedgerBalancesPanel, AstryxProvider
+        ├── lib/                           # OAuth 2.0 persona-aware API client, types, MZN formatting
+        └── components/                    # SwitchDashboard, TransferComposer, ChaosControlPanel, IsoWireInspector,
+                                           # CoreBankingPanel, LedgerBalancesPanel, SettlementPanel,
+                                           # ReconciliationPanel, FraudQueuePanel, SecurityTelemetryPanel
 ```

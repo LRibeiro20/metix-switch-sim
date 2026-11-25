@@ -1,4 +1,7 @@
 services:
+  # ---------------------------------------------------------------------------
+  # 1. Three Isolated PostgreSQL 16 Databases (Switch + BCI CBS + Standard Bank CBS)
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: metix-postgres
@@ -12,6 +15,40 @@ services:
       - metix_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U metix -d metix_switch"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bci-postgres:
+    image: postgres:16-alpine
+    container_name: bci-cbs-postgres
+    environment:
+      POSTGRES_USER: bci_user
+      POSTGRES_PASSWORD: bci_secret
+      POSTGRES_DB: bci_cbs
+    ports:
+      - "5434:5432"
+    volumes:
+      - bci_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bci_user -d bci_cbs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  stdb-postgres:
+    image: postgres:16-alpine
+    container_name: stdb-cbs-postgres
+    environment:
+      POSTGRES_USER: stdb_user
+      POSTGRES_PASSWORD: stdb_secret
+      POSTGRES_DB: stdb_cbs
+    ports:
+      - "5435:5432"
+    volumes:
+      - stdb_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stdb_user -d stdb_cbs"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -30,6 +67,120 @@ services:
       timeout: 3s
       retries: 10
 
+  # ---------------------------------------------------------------------------
+  # 2. PKI Bootstrap (Generates Root CA + mTLS X.509 certs for all services)
+  # ---------------------------------------------------------------------------
+  pki-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: metix-pki-init
+    command: ["uv", "run", "--no-dev", "python", "-c", "from shared.pki import ensure_pki_bundle; ensure_pki_bundle('/certs'); print('PKI ready')"]
+    volumes:
+      - metix_certs:/certs
+
+  # ---------------------------------------------------------------------------
+  # 3. Independent Core Banking Simulators & Mobile Wallet Adapter (mTLS)
+  # ---------------------------------------------------------------------------
+  bci-cbs:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bci-cbs-sim
+    command: ["uv", "run", "--no-dev", "python", "-m", "cbs.run_server"]
+    environment:
+      CBS_BANK_CODE: BCI_MZ
+      CBS_BANK_NAME: Banco Comercial e de Investimentos
+      CBS_BIC_CODE: CGDIMZMA
+      CBS_SERVICE_ID: bci-cbs
+      CBS_PORT: "8444"
+      CBS_DATABASE_URL: postgresql+asyncpg://bci_user:bci_secret@bci-postgres:5432/bci_cbs
+      CBS_REDIS_URL: redis://redis:6379/0
+      CBS_CERTS_DIR: /certs
+      CBS_MTLS_ENABLED: "true"
+      CBS_REQUIRE_SIGNED_REQUESTS: "true"
+    ports:
+      - "8444:8444"
+    volumes:
+      - metix_certs:/certs:ro
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+      bci-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-dev python -c \"import ssl, urllib.request; ctx = ssl.create_default_context(cafile='/certs/ca.crt'); ctx.load_cert_chain('/certs/switch-api.crt', '/certs/switch-api.key'); urllib.request.urlopen('https://localhost:8444/cbs/v1/health', context=ctx)\""]
+      interval: 6s
+      timeout: 5s
+      retries: 10
+
+  stdb-cbs:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stdb-cbs-sim
+    command: ["uv", "run", "--no-dev", "python", "-m", "cbs.run_server"]
+    environment:
+      CBS_BANK_CODE: STDB_MZ
+      CBS_BANK_NAME: Standard Bank Moçambique
+      CBS_BIC_CODE: SBICMZMX
+      CBS_SERVICE_ID: stdb-cbs
+      CBS_PORT: "8445"
+      CBS_DATABASE_URL: postgresql+asyncpg://stdb_user:stdb_secret@stdb-postgres:5432/stdb_cbs
+      CBS_REDIS_URL: redis://redis:6379/0
+      CBS_CERTS_DIR: /certs
+      CBS_MTLS_ENABLED: "true"
+      CBS_REQUIRE_SIGNED_REQUESTS: "true"
+    ports:
+      - "8445:8445"
+    volumes:
+      - metix_certs:/certs:ro
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+      stdb-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-dev python -c \"import ssl, urllib.request; ctx = ssl.create_default_context(cafile='/certs/ca.crt'); ctx.load_cert_chain('/certs/switch-api.crt', '/certs/switch-api.key'); urllib.request.urlopen('https://localhost:8445/cbs/v1/health', context=ctx)\""]
+      interval: 6s
+      timeout: 5s
+      retries: 10
+
+  wallet-sim:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: metix-wallet-sim
+    command: ["uv", "run", "--no-dev", "python", "-m", "wallet_sim.run_server"]
+    environment:
+      WALLET_SERVICE_ID: wallet-sim
+      WALLET_PORT: "8446"
+      WALLET_REDIS_URL: redis://redis:6379/0
+      WALLET_CERTS_DIR: /certs
+      WALLET_MTLS_ENABLED: "true"
+      WALLET_REQUIRE_SIGNED_REQUESTS: "true"
+    ports:
+      - "8446:8446"
+    volumes:
+      - metix_certs:/certs:ro
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-dev python -c \"import ssl, urllib.request; ctx = ssl.create_default_context(cafile='/certs/ca.crt'); ctx.load_cert_chain('/certs/switch-api.crt', '/certs/switch-api.key'); urllib.request.urlopen('https://localhost:8446/wallet/v1/health', context=ctx)\""]
+      interval: 6s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 4. METIX Central Switch API, 25s SPIM SLA Sweeper & Operations Dashboard
+  # ---------------------------------------------------------------------------
   switch-api:
     build:
       context: ./backend
@@ -38,16 +189,29 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://metix:metix_secret@postgres:5432/metix_switch
       REDIS_URL: redis://redis:6379/0
-      BENEFICIARY_BASE_URL: http://switch-api:8000
+      BCI_CBS_BASE_URL: https://bci-cbs:8444
+      STDB_CBS_BASE_URL: https://stdb-cbs:8445
+      WALLET_SIM_BASE_URL: https://wallet-sim:8446
+      CERTS_DIR: /certs
+      MTLS_ENABLED: "true"
+      AUTH_ENFORCE_TRANSFERS: "true"
       SPIM_SLA_SECONDS: "25"
       RUN_INLINE_SWEEPER: "false"
       CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
     ports:
       - "8000:8000"
+    volumes:
+      - metix_certs:/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      bci-cbs:
+        condition: service_healthy
+      stdb-cbs:
+        condition: service_healthy
+      wallet-sim:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
@@ -64,9 +228,15 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://metix:metix_secret@postgres:5432/metix_switch
       REDIS_URL: redis://redis:6379/0
-      BENEFICIARY_BASE_URL: http://switch-api:8000
+      BCI_CBS_BASE_URL: https://bci-cbs:8444
+      STDB_CBS_BASE_URL: https://stdb-cbs:8445
+      WALLET_SIM_BASE_URL: https://wallet-sim:8446
+      CERTS_DIR: /certs
+      MTLS_ENABLED: "true"
       SPIM_SLA_SECONDS: "25"
       SWEEPER_POLL_INTERVAL_SECONDS: "1.0"
+    volumes:
+      - metix_certs:/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,4 +262,7 @@ services:
 
 volumes:
   metix_pgdata:
+  bci_pgdata:
+  stdb_pgdata:
   metix_redisdata:
+  metix_certs:

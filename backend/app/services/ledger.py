@@ -30,13 +30,13 @@ class OptimisticLockError(LedgerError):
 async def post_balanced_journal(
     session: AsyncSession,
     *,
-    transaction_id: uuid.UUID,
+    transaction_id: uuid.UUID | None,
     entry_type: JournalEntryType,
     description: str,
     debit_account_id: uuid.UUID,
     credit_account_id: uuid.UUID,
     amount_centavos: int,
-    max_retries: int = 5,
+    max_retries: int = 8,
 ) -> JournalEntry:
     """Atomically mutate two account balances via a balanced double-entry journal posting.
 
@@ -44,6 +44,7 @@ async def post_balanced_journal(
     - Minor units (int centavos) strictly > 0.
     - Optimistic locking via `accounts.version` checked and incremented on every balance write.
     - Exactly balanced DEBIT and CREDIT postings where SUM(DEBIT) == SUM(CREDIT).
+    - Deterministic UUID lock ordering prevents circular deadlocks.
     """
     if not isinstance(amount_centavos, int) or amount_centavos <= 0:
         raise LedgerError("amount_centavos must be a strictly positive integer")
@@ -52,7 +53,6 @@ async def post_balanced_journal(
 
     for _attempt in range(max_retries):
         async with session.begin_nested() as nested:
-            # Always fetch fresh account rows from DB (bypassing stale identity map cache)
             result = await session.execute(
                 select(Account)
                 .where(Account.id.in_([debit_account_id, credit_account_id]))
@@ -74,7 +74,6 @@ async def post_balanced_journal(
                     f"centavos, required {amount_centavos}"
                 )
 
-            # Deterministic lock ordering by UUID prevents deadlocks on opposite-direction transfers
             updates: list[tuple[uuid.UUID, int, int]] = sorted(
                 [
                     (debit_acct.id, debit_acct.version, -amount_centavos),
@@ -126,7 +125,6 @@ async def post_balanced_journal(
             session.add_all([debit_posting, credit_posting])
             await session.flush()
 
-            # Refresh accounts so session identity map reflects updated balance/version
             session.expire(debit_acct)
             session.expire(credit_acct)
             return entry

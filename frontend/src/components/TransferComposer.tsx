@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, RefreshCw, Send, Zap } from "lucide-react";
+import { ArrowRight, RefreshCw, Send, ShieldAlert, Zap } from "lucide-react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -14,11 +14,12 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 
 import { submitTransfer } from "@/lib/api";
 import { formatMzn, generateIdempotencyKey, parseMznToCentavos } from "@/lib/format";
-import type { AccountInfo, SwitchTransaction } from "@/lib/types";
+import type { BankCustomerAccount, SwitchTransaction } from "@/lib/types";
 
 interface TransferComposerProps {
-  accounts: AccountInfo[];
-  onTransferSettled: (tx: SwitchTransaction, notice?: string) => void;
+  bankAccounts: BankCustomerAccount[];
+  canInitiate: boolean;
+  onTransferSettled: (tx: SwitchTransaction) => void;
 }
 
 const QUICK_AMOUNTS = [
@@ -28,14 +29,15 @@ const QUICK_AMOUNTS = [
   { label: "210,000 MT (Cap Test)", value: "210000.00" },
 ];
 
-export function TransferComposer({ accounts, onTransferSettled }: TransferComposerProps) {
+export function TransferComposer({
+  bankAccounts,
+  canInitiate,
+  onTransferSettled,
+}: TransferComposerProps) {
+  // BCI and Standard Bank can initiate bidirectional interbank transfers
   const originatorAccounts = useMemo(
-    () => accounts.filter((a) => a.institution_role === "ORIGINATOR"),
-    [accounts]
-  );
-  const beneficiaryAccounts = useMemo(
-    () => accounts.filter((a) => a.institution_role === "BENEFICIARY"),
-    [accounts]
+    () => bankAccounts.filter((a) => a.bank_code === "BCI_MZ" || a.bank_code === "STDB_MZ"),
+    [bankAccounts]
   );
 
   const [originatorAcct, setOriginatorAcct] = useState<string>("");
@@ -50,28 +52,43 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
     description: string;
   } | null>(null);
 
+  const beneficiaryAccounts = useMemo(
+    () => bankAccounts.filter((a) => a.account_number !== originatorAcct),
+    [bankAccounts, originatorAcct]
+  );
+
   useEffect(() => {
     if (!originatorAcct && originatorAccounts.length > 0) {
       setOriginatorAcct(originatorAccounts[0].account_number);
     }
-    if (!beneficiaryAcct && beneficiaryAccounts.length > 0) {
-      setBeneficiaryAcct(beneficiaryAccounts[0].account_number);
+  }, [originatorAccounts, originatorAcct]);
+
+  useEffect(() => {
+    if (
+      (!beneficiaryAcct || beneficiaryAcct === originatorAcct) &&
+      beneficiaryAccounts.length > 0
+    ) {
+      // Default to opposite bank (Standard Bank if originator is BCI)
+      const crossBank = beneficiaryAccounts.find(
+        (a) => a.bank_code === "STDB_MZ" || a.bank_code === "BCI_MZ"
+      );
+      setBeneficiaryAcct((crossBank ?? beneficiaryAccounts[0]).account_number);
     }
-  }, [originatorAccounts, beneficiaryAccounts, originatorAcct, beneficiaryAcct]);
+  }, [beneficiaryAccounts, beneficiaryAcct, originatorAcct]);
 
   const selectedOriginator = originatorAccounts.find((a) => a.account_number === originatorAcct);
   const selectedBeneficiary = beneficiaryAccounts.find((a) => a.account_number === beneficiaryAcct);
 
   const originatorOptions = originatorAccounts.map((a) => ({
     value: a.account_number,
-    label: `${a.institution_code} · ${a.holder_name}`,
-    description: `${a.account_number} · Bal ${formatMzn(a.balance_centavos)}`,
+    label: `${a.bank_code} · ${a.holder_name}`,
+    description: `${a.account_number} · Avail ${formatMzn(a.available_balance_centavos)} / Ledger ${formatMzn(a.ledger_balance_centavos)}`,
   }));
 
   const beneficiaryOptions = beneficiaryAccounts.map((a) => ({
     value: a.account_number,
-    label: `${a.institution_code} · ${a.holder_name}`,
-    description: `${a.account_number} · Bal ${formatMzn(a.balance_centavos)}`,
+    label: `${a.bank_code} · ${a.holder_name}`,
+    description: `${a.account_number} · Avail ${formatMzn(a.available_balance_centavos)} · ${a.status}`,
   }));
 
   async function handleSingleTransfer() {
@@ -106,15 +123,22 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
       } else if (tx.status === "COMPLETED") {
         setFeedback({
           status: "success",
-          title: `Settled · DE 39 = 00 · Auth ${tx.auth_id ?? "OK"}`,
-          description: `${formatMzn(tx.amount_centavos)} cleared from ${tx.originator_code} to ${tx.beneficiary_code} (STAN ${tx.stan}).`,
+          title: `Settled · DE 39 = 00 · Auth ${tx.auth_id ?? "OK"} (${tx.processing_latency_ms ?? 0}ms)`,
+          description: `${formatMzn(tx.amount_centavos)} cleared ${tx.originator_code} -> ${tx.beneficiary_code} (CBS hold captured, STAN ${tx.stan}).`,
+        });
+        setIdempotencyKey(generateIdempotencyKey());
+      } else if (tx.status === "INITIATED" && tx.fraud_status === "PENDING_REVIEW") {
+        setFeedback({
+          status: "warning",
+          title: `Held in Fraud Review Queue · Risk Score ${tx.fraud_score}/100`,
+          description: `STAN ${tx.stan} paused prior to routing. Open Fraud & Risk Monitoring as a Fraud Analyst to Release or Block.`,
         });
         setIdempotencyKey(generateIdempotencyKey());
       } else if (tx.status === "ROUTED") {
         setFeedback({
           status: "warning",
-          title: `In-Flight (ROUTED) · Awaiting 0210 ACK`,
-          description: `Funds held in METIX_SUSPENSE. If no 0210 arrives within 25s SPIM SLA, the sweeper will dispatch MTI 0420 Reversal Advice.`,
+          title: `In-Flight (ROUTED) · Funds Earmarked in ${tx.originator_code} & Suspense`,
+          description: `Available balance held (${tx.originator_hold_ref ?? "CBS Hold"}). If no 0210 arrives within 25s SPIM SLA, MTI 0420 releases the hold.`,
         });
         setIdempotencyKey(generateIdempotencyKey());
       } else {
@@ -124,7 +148,7 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
           description:
             tx.failure_reason ||
             tx.response_description ||
-            "Transaction declined by switch rules or beneficiary.",
+            "Transaction declined by switch rules, CBS restriction, or beneficiary.",
         });
         setIdempotencyKey(generateIdempotencyKey());
       }
@@ -167,8 +191,8 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
 
       setFeedback({
         status: uniqueTxIds.size === 1 ? "success" : "error",
-        title: `Retry Storm Absorbed: 5 concurrent requests -> ${uniqueTxIds.size} ledger execution`,
-        description: `${freshCount} fresh execution, ${replayCount} Redis SET NX idempotent replays on key "${stormKey}" (STAN ${firstTx.stan}, status ${firstTx.status}).`,
+        title: `Retry Storm Absorbed: 5 concurrent requests -> ${uniqueTxIds.size} CBS & Switch execution`,
+        description: `${freshCount} fresh execution, ${replayCount} Redis SET NX idempotent replays (STAN ${firstTx.stan}, status ${firstTx.status}).`,
       });
       setIdempotencyKey(generateIdempotencyKey());
       onTransferSettled(firstTx);
@@ -190,10 +214,10 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="min-w-0">
           <Heading level={4} weight="semibold">
-            Initiate ISO 8583 Transfer
+            Initiate Interbank ISO 8583 Transfer
           </Heading>
           <Text type="supporting" display="block">
-            Originator PSP dispatch · MTI 0200 · ISO 4217 Currency 943 (MZN)
+            Bidirectional BCI ↔ Standard Bank CBS + Optional Wallets · Ed25519 Signed
           </Text>
         </div>
         <div className="shrink-0">
@@ -204,62 +228,80 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-3">
           <Selector
-            label="Originator PSP Account (DE 102)"
+            label="Originator CBS Account (DE 102)"
             options={originatorOptions}
             value={originatorAcct}
             onChange={setOriginatorAcct}
-            placeholder="Select originator account"
+            placeholder="Select originator CBS account"
             width="100%"
           />
 
           {selectedOriginator && (
-            <div className="flex items-center justify-between px-3 py-2 rounded-md bg-muted border border-border text-xs">
-              <div className="flex items-center gap-2">
-                <Badge
-                  variant={selectedOriginator.account_tier === "BUSINESS" ? "purple" : "neutral"}
-                  label={selectedOriginator.account_tier}
-                />
-                <span className="text-secondary">
-                  Daily cap:{" "}
-                  <strong className="text-primary tabular-nums">
-                    {selectedOriginator.daily_limit_centavos
-                      ? formatMzn(selectedOriginator.daily_limit_centavos)
-                      : "Unlimited"}
+            <div className="px-3 py-2 rounded-md bg-muted border border-border text-xs space-y-1.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Badge
+                    variant={selectedOriginator.account_tier === "BUSINESS" ? "purple" : "neutral"}
+                    label={selectedOriginator.account_tier}
+                  />
+                  <Badge
+                    variant={selectedOriginator.status === "ACTIVE" ? "success" : "error"}
+                    label={selectedOriginator.status}
+                  />
+                </div>
+                <span className="text-secondary tabular-nums">
+                  Cap:{" "}
+                  <strong className="text-primary">
+                    {formatMzn(selectedOriginator.switch_daily_used_centavos)} /{" "}
+                    {formatMzn(selectedOriginator.daily_limit_centavos)}
                   </strong>
                 </span>
               </div>
-              <span className="text-secondary tabular-nums">
-                Used today:{" "}
-                <strong className="text-primary">
-                  {formatMzn(selectedOriginator.daily_used_centavos)}
-                </strong>
-              </span>
+              <div className="flex items-center justify-between font-mono text-[11px] text-secondary tabular-nums">
+                <span>
+                  Available:{" "}
+                  <strong className="text-primary">
+                    {formatMzn(selectedOriginator.available_balance_centavos)}
+                  </strong>
+                </span>
+                <span>
+                  Ledger:{" "}
+                  <strong className="text-primary">
+                    {formatMzn(selectedOriginator.ledger_balance_centavos)}
+                  </strong>
+                </span>
+                {selectedOriginator.earmarked_centavos > 0 && (
+                  <span className="text-warning font-semibold">
+                    Held: {formatMzn(selectedOriginator.earmarked_centavos)}
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
           <div className="flex items-center justify-center py-0.5 text-secondary">
             <div className="flex items-center gap-2 text-xs font-medium px-2.5 py-0.5 rounded-full bg-muted border border-border">
-              <span>{selectedOriginator?.institution_code ?? "ORIGINATOR"}</span>
+              <span>{selectedOriginator?.bank_code ?? "ORIGINATOR"}</span>
               <ArrowRight className="w-3.5 h-3.5 text-accent" />
               <span>METIX_SWITCH</span>
               <ArrowRight className="w-3.5 h-3.5 text-accent" />
-              <span>{selectedBeneficiary?.institution_code ?? "BENEFICIARY"}</span>
+              <span>{selectedBeneficiary?.bank_code ?? "BENEFICIARY"}</span>
             </div>
           </div>
 
           <Selector
-            label="Beneficiary PSP / Mobile Wallet (DE 103)"
+            label="Beneficiary CBS / Wallet Account (DE 103)"
             options={beneficiaryOptions}
             value={beneficiaryAcct}
             onChange={setBeneficiaryAcct}
-            placeholder="Select beneficiary wallet"
+            placeholder="Select beneficiary account"
             width="100%"
           />
         </div>
 
         <div className="space-y-2">
           <TextInput
-            label="Amount in MZN (DE 4 — converted to integer centavos)"
+            label="Amount in MZN (DE 4 — integer centavos)"
             value={amountInput}
             onChange={setAmountInput}
             placeholder="5000.00"
@@ -304,6 +346,15 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
           />
         </div>
 
+        {!canInitiate && (
+          <div className="flex items-center gap-2 text-xs text-warning bg-warning-muted px-3 py-2 rounded-md">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span>
+              Current RBAC persona is read-only for transfer initiation. Switch to Maker or Admin.
+            </span>
+          </div>
+        )}
+
         <Divider />
 
         <div className="flex flex-col sm:flex-row gap-2.5">
@@ -314,7 +365,7 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
             width="100%"
             icon={<Send className="w-4 h-4" />}
             isLoading={isSending}
-            isDisabled={isStorming || !parsedPreview}
+            isDisabled={!canInitiate || isStorming || !parsedPreview}
             onClick={handleSingleTransfer}
           />
           <Button
@@ -324,7 +375,7 @@ export function TransferComposer({ accounts, onTransferSettled }: TransferCompos
             width="100%"
             icon={<Zap className="w-4 h-4" />}
             isLoading={isStorming}
-            isDisabled={isSending || !parsedPreview}
+            isDisabled={!canInitiate || isSending || !parsedPreview}
             tooltip="Fires 5 concurrent POST /api/v1/transfers with identical idempotency_key"
             onClick={handleDuplicateStorm}
           />

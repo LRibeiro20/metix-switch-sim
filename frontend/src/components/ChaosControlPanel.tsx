@@ -1,35 +1,43 @@
 "use client";
 
-import { useState } from "react";
-import { AlertTriangle, CheckCircle2, Clock, Radio, ShieldAlert, WifiOff } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  PowerOff,
+  Radio,
+  ShieldAlert,
+  WifiOff,
+} from "lucide-react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Text } from "@astryxdesign/core/Text";
 
-import { updateChaos } from "@/lib/api";
-import type { ChaosConfig } from "@/lib/types";
+import { fetchBankChaos, updateBankChaos } from "@/lib/api";
+import type { BankChaosConfig } from "@/lib/types";
 
 interface ChaosControlPanelProps {
-  chaos: ChaosConfig | null;
-  onChaosUpdated: (next: ChaosConfig) => void;
+  canMutate: boolean;
+  onChaosUpdated?: () => void;
 }
 
 const PRESETS = [
   {
     id: "normal",
-    label: "Normal (200ms)",
+    label: "Normal (60ms)",
     tag: "DE 39 = 00",
-    description: "Healthy beneficiary PSP responds with 0210 approval in 200ms.",
+    description: "Healthy CBS / Wallet responds with signed 0210 approval.",
     icon: CheckCircle2,
     tone: "success" as const,
   },
   {
     id: "slow_15s",
-    label: "Slow Network (15s)",
+    label: "Slow CBS (15s)",
     tag: "Within 25s SLA",
-    description: "Injects 15,000ms latency. Still clears before 25s SPIM SLA deadline.",
+    description: "Injects 15s latency inside target CBS; still clears before 25s SLA.",
     icon: Clock,
     tone: "warning" as const,
   },
@@ -37,15 +45,15 @@ const PRESETS = [
     id: "drop_0210",
     label: "Drop 0210 ACK (>25s)",
     tag: "0420 Reversal",
-    description: "Beneficiary drops 0210 ACK; SLA sweeper triggers DE 39 = 68 & 0420 reversal.",
+    description: "Drops 0210 ACK; SLA sweeper sends 0420 & releases originator CBS hold.",
     icon: WifiOff,
     tone: "error" as const,
   },
   {
     id: "inoperative_91",
-    label: "Issuer Inoperative",
+    label: "CBS Inoperative",
     tag: "DE 39 = 91",
-    description: "Beneficiary returns DE 39 = 91; clearing hold reverses immediately.",
+    description: "Target bank returns DE 39 = 91; clearing & CBS earmark reverse immediately.",
     icon: AlertTriangle,
     tone: "error" as const,
   },
@@ -53,59 +61,76 @@ const PRESETS = [
     id: "recon_hold",
     label: "Drop 0210 + Fail 0430",
     tag: "RECON_HOLD",
-    description: "Drops both 0210 and 0430 to test manual reconciliation hold escalation.",
+    description: "Drops both 0210 and 0430 to test RECON_HOLD & Maker-Checker adjustment.",
     icon: ShieldAlert,
     tone: "warning" as const,
   },
+  {
+    id: "offline",
+    label: "CBS Offline Outage",
+    tag: "HTTP 503",
+    description: "Simulates complete bank simulator downtime for connectivity alerts.",
+    icon: PowerOff,
+    tone: "error" as const,
+  },
 ];
 
-export function ChaosControlPanel({ chaos, onChaosUpdated }: ChaosControlPanelProps) {
+export function ChaosControlPanel({ canMutate, onChaosUpdated }: ChaosControlPanelProps) {
+  const [targetBank, setTargetBank] = useState<string>("STDB_MZ");
+  const [chaos, setChaos] = useState<BankChaosConfig | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
-  const currentPreset = chaos?.preset ?? "normal";
-  const currentTarget = chaos?.target_beneficiary ?? "ALL";
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetchBankChaos(targetBank)
+      .then((cfg) => {
+        if (active) {
+          setChaos(cfg);
+          setErrMsg(null);
+        }
+      })
+      .catch((e) => {
+        if (active) setErrMsg(e instanceof Error ? e.message : "Unable to load CBS chaos state");
+      });
+    return () => {
+      active = false;
+    };
+  }, [targetBank]);
 
   async function selectPreset(presetId: string) {
+    if (!canMutate) return;
     setUpdating(presetId);
+    setErrMsg(null);
     try {
-      const updated = await updateChaos({
-        preset: presetId,
-        target_beneficiary: currentTarget === "ALL" ? null : currentTarget,
-      });
-      onChaosUpdated(updated);
+      const updated = await updateBankChaos(targetBank, { preset: presetId });
+      setChaos(updated);
+      onChaosUpdated?.();
+    } catch (e) {
+      setErrMsg(e instanceof Error ? e.message : "Failed updating chaos state");
     } finally {
       setUpdating(null);
     }
   }
 
-  async function selectTarget(nextTarget: string) {
-    setUpdating("scope");
-    try {
-      const updated = await updateChaos({
-        preset: currentPreset,
-        target_beneficiary: nextTarget === "ALL" ? null : nextTarget,
-      });
-      onChaosUpdated(updated);
-    } finally {
-      setUpdating(null);
-    }
-  }
+  const currentPreset = chaos?.preset ?? "normal";
 
   return (
     <Card padding={5} elevation="low" className="w-full">
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="min-w-0">
           <Heading level={4} weight="semibold">
-            Beneficiary PSP Chaos Controls
+            Per-Bank CBS Chaos Injection
           </Heading>
           <Text type="supporting" display="block">
-            Live Redis fault injection across MPESA_MZ &amp; EMOLA_MZ simulators
+            Signed adapter fault controls across independent CBS &amp; wallet services
           </Text>
         </div>
         <div className="shrink-0">
           <Badge
             variant={currentPreset === "normal" ? "success" : "warning"}
             icon={<Radio className="w-3 h-3" />}
-            label={currentPreset === "normal" ? "Healthy" : "Fault Active"}
+            label={currentPreset === "normal" ? "Healthy" : `${targetBank}: ${currentPreset}`}
           />
         </div>
       </div>
@@ -113,19 +138,20 @@ export function ChaosControlPanel({ chaos, onChaosUpdated }: ChaosControlPanelPr
       <div className="space-y-4">
         <div>
           <Text type="label" display="block" className="mb-1.5">
-            Fault Target Scope
+            Target Participant Simulator
           </Text>
           <SegmentedControl
-            label="Fault Target Scope"
-            value={currentTarget}
-            onChange={selectTarget}
+            label="Target Participant Simulator"
+            value={targetBank}
+            onChange={setTargetBank}
             layout="fill"
             size="sm"
             isDisabled={updating !== null}
           >
-            <SegmentedControlItem value="ALL" label="All Beneficiaries" />
-            <SegmentedControlItem value="MPESA_MZ" label="MPESA_MZ" />
-            <SegmentedControlItem value="EMOLA_MZ" label="EMOLA_MZ" />
+            <SegmentedControlItem value="BCI_MZ" label="BCI CBS" />
+            <SegmentedControlItem value="STDB_MZ" label="STDB CBS" />
+            <SegmentedControlItem value="MPESA_MZ" label="M-Pesa" />
+            <SegmentedControlItem value="EMOLA_MZ" label="e-Mola" />
           </SegmentedControl>
         </div>
 
@@ -137,9 +163,11 @@ export function ChaosControlPanel({ chaos, onChaosUpdated }: ChaosControlPanelPr
               <button
                 key={item.id}
                 type="button"
-                disabled={updating !== null}
+                disabled={!canMutate || updating !== null}
                 onClick={() => selectPreset(item.id)}
-                className={`w-full text-left px-3.5 py-2.5 rounded-md border transition-all cursor-pointer ${
+                className={`w-full text-left px-3.5 py-2.5 rounded-md border transition-all ${
+                  canMutate ? "cursor-pointer" : "cursor-not-allowed opacity-70"
+                } ${
                   active
                     ? "border-accent bg-accent-muted/45 shadow-xs"
                     : "border-border bg-surface hover:bg-muted"
@@ -152,9 +180,7 @@ export function ChaosControlPanel({ chaos, onChaosUpdated }: ChaosControlPanelPr
                         active ? "text-accent" : "text-secondary"
                       }`}
                     />
-                    <span className="text-sm font-medium text-primary truncate">
-                      {item.label}
-                    </span>
+                    <span className="text-sm font-medium text-primary truncate">{item.label}</span>
                   </div>
                   <Badge variant={active ? item.tone : "neutral"} label={item.tag} />
                 </div>
@@ -166,28 +192,7 @@ export function ChaosControlPanel({ chaos, onChaosUpdated }: ChaosControlPanelPr
           })}
         </div>
 
-        {chaos && (
-          <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border text-xs">
-            <div className="px-2.5 py-1.5 rounded bg-muted">
-              <div className="text-secondary">Latency</div>
-              <div className="font-mono font-semibold text-primary tabular-nums">
-                {chaos.latency_ms} ms
-              </div>
-            </div>
-            <div className="px-2.5 py-1.5 rounded bg-muted">
-              <div className="text-secondary">Drop 0210</div>
-              <div className="font-mono font-semibold text-primary">
-                {chaos.drop_0210 ? "TRUE" : "FALSE"}
-              </div>
-            </div>
-            <div className="px-2.5 py-1.5 rounded bg-muted">
-              <div className="text-secondary">Force DE 39</div>
-              <div className="font-mono font-semibold text-primary">
-                {chaos.force_de39 ?? "00"}
-              </div>
-            </div>
-          </div>
-        )}
+        {errMsg && <div className="text-xs text-error font-medium">{errMsg}</div>}
       </div>
     </Card>
   );

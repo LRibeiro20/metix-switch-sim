@@ -61,8 +61,8 @@ class RedisGuard:
             return self.settings.business_daily_limit_centavos
         return None
 
-    def _daily_limit_key(self, account_id: uuid.UUID, day: str | None = None) -> str:
-        return f"metix:daily_limit:{account_id}:{day or self._today_cat()}"
+    def _daily_limit_key(self, account_ref: uuid.UUID | str, day: str | None = None) -> str:
+        return f"metix:daily_limit:{account_ref}:{day or self._today_cat()}"
 
     def _idemp_lock_key(self, idempotency_key: str) -> str:
         return f"metix:idemp:lock:{idempotency_key}"
@@ -124,7 +124,7 @@ class RedisGuard:
         return f"{int(seq) % 1_000_000:06d}"
 
     async def reserve_daily_limit(
-        self, account_id: uuid.UUID, tier: str, amount_centavos: int
+        self, account_ref: uuid.UUID | str, tier: str, amount_centavos: int
     ) -> tuple[bool, int, int]:
         """Atomically check & reserve Notice No. 1/GBM/2026 daily limit.
 
@@ -133,20 +133,19 @@ class RedisGuard:
         cap = self.daily_limit_for_tier(tier)
         if cap is None:
             return True, 0, 0
-        key = self._daily_limit_key(account_id)
-        # 48h TTL guarantees key outlives the CAT calendar day cleanly across timezone boundaries.
+        key = self._daily_limit_key(account_ref)
         res = await self._reserve_script(keys=[key], args=[amount_centavos, cap, 172_800])
         allowed = int(res[0]) == 1
         usage = int(res[1])
         return allowed, usage, cap
 
-    async def release_daily_limit(self, account_id: uuid.UUID, amount_centavos: int) -> int:
-        key = self._daily_limit_key(account_id)
+    async def release_daily_limit(self, account_ref: uuid.UUID | str, amount_centavos: int) -> int:
+        key = self._daily_limit_key(account_ref)
         updated = await self._release_script(keys=[key], args=[amount_centavos])
         return int(updated)
 
-    async def get_daily_usage(self, account_id: uuid.UUID) -> int:
-        raw = await self.client.get(self._daily_limit_key(account_id))
+    async def get_daily_usage(self, account_ref: uuid.UUID | str) -> int:
+        raw = await self.client.get(self._daily_limit_key(account_ref))
         if raw is None:
             return 0
         return int(raw.decode() if isinstance(raw, bytes) else raw)

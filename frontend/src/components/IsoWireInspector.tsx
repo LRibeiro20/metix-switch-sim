@@ -346,6 +346,21 @@ export function IsoWireInspector({
                           Auth <Code>{activeTx.auth_id}</Code>
                         </span>
                       )}
+                      {activeTx.originator_hold_ref && (
+                        <span>
+                          CBS Hold <Code>{activeTx.originator_hold_ref}</Code>
+                        </span>
+                      )}
+                      {activeTx.fraud_score > 0 && (
+                        <span>
+                          Risk <Code>{activeTx.fraud_score}/100</Code>
+                        </span>
+                      )}
+                      {activeTx.processing_latency_ms != null && (
+                        <span>
+                          RTT <Code>{activeTx.processing_latency_ms}ms</Code>
+                        </span>
+                      )}
                       <span className="truncate max-w-[260px]">
                         Key <Code>{activeTx.idempotency_key}</Code>
                       </span>

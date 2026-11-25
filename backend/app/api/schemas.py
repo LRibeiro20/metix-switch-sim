@@ -25,6 +25,8 @@ class IsoMessageOut(BaseModel):
     response_code: str | None
     payload_json: dict[str, Any]
     raw_iso_snippet: str
+    signature_key_id: str | None = None
+    signature_verified: bool = True
     created_at: datetime
 
 
@@ -40,7 +42,7 @@ class JournalPostingOut(BaseModel):
 
 class JournalEntryOut(BaseModel):
     id: uuid.UUID
-    transaction_id: uuid.UUID
+    transaction_id: uuid.UUID | None
     entry_type: str
     description: str
     created_at: datetime
@@ -57,6 +59,9 @@ class TransactionOut(BaseModel):
     beneficiary_code: str
     originator_account_id: uuid.UUID
     beneficiary_account_id: uuid.UUID
+    originator_account_number: str
+    beneficiary_account_number: str
+    originator_hold_ref: str | None = None
     amount_centavos: int
     currency: str
     status: str
@@ -64,6 +69,11 @@ class TransactionOut(BaseModel):
     response_description: str | None
     auth_id: str | None
     failure_reason: str | None
+    fraud_score: int = 0
+    fraud_status: str = "CLEAR"
+    processing_latency_ms: int | None = None
+    signature_verified: bool = True
+    settlement_cycle_id: uuid.UUID | None = None
     sla_deadline_at: datetime
     created_at: datetime
     updated_at: datetime
@@ -101,10 +111,83 @@ class LedgerSummaryOut(BaseModel):
     entries: list[JournalEntryOut]
 
 
-class ChaosPresetRequest(BaseModel):
+class OAuthTokenRequest(BaseModel):
+    grant_type: str = Field(default="password", pattern=r"^(password|client_credentials)$")
+    username: str | None = None
+    password: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+
+
+class OAuthTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int
+    subject: str
+    display_name: str
+    role: str
+    scopes: list[str]
+
+
+class MakerCheckerDecisionRequest(BaseModel):
+    approve: bool
+    notes: str = Field(..., min_length=2, max_length=512)
+
+
+class ReconAdjustProposeRequest(BaseModel):
+    adjustment_mode: str = Field(
+        default="RELEASE_SUSPENSE_TO_ORIGINATOR",
+        pattern=r"^(RELEASE_SUSPENSE_TO_ORIGINATOR|FORCE_SETTLE_TO_BENEFICIARY|DISMISS_WITH_NOTES)$",
+    )
+    reason: str = Field(..., min_length=3, max_length=512)
+
+
+class FraudDecisionRequest(BaseModel):
+    decision: str = Field(..., pattern=r"^(RELEASE|CONFIRM_FRAUD)$")
+    notes: str = Field(..., min_length=3, max_length=512)
+
+
+class SettlementRunRequest(BaseModel):
+    simulate_failure_institution: str | None = None
+
+
+class ShortfallToggleRequest(BaseModel):
+    institution_code: str
+    enabled: bool
+
+
+class LiquidityTopupRequest(BaseModel):
+    institution_code: str
+    amount_centavos: int = Field(..., gt=0)
+    reason: str = Field(default="Intraday BM RTGS liquidity top-up", max_length=256)
+    immediate: bool = False
+
+
+class BankChaosUpdateRequest(BaseModel):
     preset: str | None = None
     latency_ms: int | None = Field(default=None, ge=0, le=60_000)
     drop_0210: bool | None = None
     force_de39: str | None = Field(default=None, pattern=r"^[A-Z0-9]{2}$")
     fail_0430: bool | None = None
-    target_beneficiary: str | None = None
+    offline: bool | None = None
+
+
+class BankRestrictionProposalRequest(BaseModel):
+    status: str | None = Field(default=None, pattern=r"^(ACTIVE|PND|PNC|FROZEN|CLOSED)$")
+    per_tx_limit_centavos: int | None = Field(default=None, gt=0)
+    daily_limit_centavos: int | None = Field(default=None, gt=0)
+    reason: str = Field(..., min_length=3, max_length=256)
+    immediate: bool = False
+
+
+class ReconFaultProxyRequest(BaseModel):
+    bank_code: str = Field(..., pattern=r"^(BCI_MZ|STDB_MZ)$")
+    fault_type: str = Field(
+        ...,
+        pattern=r"^(ORPHAN_CBS_POSTING|DUPLICATE_CBS_POSTING|STALE_ACTIVE_HOLD)$",
+    )
+    account_number: str
+    amount_centavos: int = Field(default=150_000, gt=0)
+    switch_tx_id: uuid.UUID | None = None
+    stan: str | None = None
+    rrn: str | None = None
