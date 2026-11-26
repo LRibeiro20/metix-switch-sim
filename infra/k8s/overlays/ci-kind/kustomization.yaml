@@ -1,0 +1,35 @@
+# CI overlay — ephemeral kind cluster in GitHub Actions.
+# Images are side-loaded with `kind load docker-image`, so they must never be
+# pulled. CPU/memory requests are trimmed so all pods fit on a 2-vCPU runner.
+# Services stay ClusterIP; the smoke test reaches them via kubectl port-forward.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      metix.mz/environment: ci-kind
+    includeSelectors: false
+
+patches:
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests
+        value:
+          cpu: 25m
+          memory: 96Mi
+  - target:
+      kind: StatefulSet
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests
+        value:
+          cpu: 25m
+          memory: 64Mi

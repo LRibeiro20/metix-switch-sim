@@ -1,0 +1,19 @@
+# Non-sensitive runtime configuration shared by the Switch API and SLA sweeper.
+# Credentials and cryptographic material live in Terraform-managed Secrets.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metix-switch-config
+data:
+  REDIS_URL: redis://redis:6379/0
+  BCI_CBS_BASE_URL: https://bci-cbs:8444
+  STDB_CBS_BASE_URL: https://stdb-cbs:8445
+  WALLET_SIM_BASE_URL: https://wallet-sim:8446
+  CERTS_DIR: /certs
+  MTLS_ENABLED: "true"
+  AUTH_ENFORCE_TRANSFERS: "true"
+  # Banco de Mocambique Notice No. 1/GBM/2026 — 25-second SPIM SLA (non-negotiable).
+  SPIM_SLA_SECONDS: "25"
+  RUN_INLINE_SWEEPER: "false"
+  SWEEPER_POLL_INTERVAL_SECONDS: "1.0"
+  CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'

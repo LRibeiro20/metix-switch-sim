@@ -1,0 +1,23 @@
+# Local overlay — Docker Desktop Kubernetes.
+# Images are built locally (metix-backend:local / metix-frontend:local) and shared
+# with the cluster through the Docker Desktop daemon. switch-api and frontend are
+# exposed as LoadBalancer services, which Docker Desktop binds to localhost.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      metix.mz/environment: local
+    includeSelectors: false
+
+patches:
+  - path: services-patch.yaml
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

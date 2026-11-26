@@ -1,0 +1,23 @@
+# METIX / SIMOrede switch — portable Kubernetes base.
+#
+# The Namespace and the three Secrets referenced here (metix-pki-certs,
+# metix-db-credentials, metix-app-secrets) are owned by Terraform
+# (infra/terraform/modules/k8s_foundation) and must exist before this
+# Kustomization is applied. Use an overlay (local / ci-kind), not this base directly.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: metix-switch
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: metix-switch
+    includeSelectors: false
+
+resources:
+  - configmap.yaml
+  - datastores.yaml
+  - cbs-and-wallet.yaml
+  - switch-and-sweeper.yaml
+  - frontend.yaml
+  - network-policies.yaml

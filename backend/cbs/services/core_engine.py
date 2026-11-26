@@ -125,7 +125,7 @@ class CbsCoreEngine:
             id=acct.id,
             bank_code=self.settings.bank_code,
             bank_name=self.settings.bank_name,
-            bic_code=self.settings.bic_code, 
+            bic_code=self.settings.bic_code,
             account_number=acct.account_number,
             holder_name=holder_plain,
             holder_name_masked=acct.holder_name_masked,

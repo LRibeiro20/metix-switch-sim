@@ -1,0 +1,102 @@
+# Bank Core Isolation enforced at the network layer (ingress only; egress is
+# left open so DNS keeps working). Each participant CBS database is reachable
+# exclusively by its own CBS simulator; the Switch database only by the Switch
+# components; participant simulators only accept traffic from the Switch.
+# NOTE: enforcement requires a NetworkPolicy-capable CNI (kind >= v0.24 kindnet
+# enforces it; Docker Desktop's default CNI accepts but does not enforce it).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bci-postgres-isolation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bci-postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bci-cbs
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stdb-postgres-isolation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: stdb-postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: stdb-cbs
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: switch-postgres-isolation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: switch-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sla-sweeper
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-clients-only
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["switch-api", "sla-sweeper", "bci-cbs", "stdb-cbs", "wallet-sim"]
+      ports:
+        - { protocol: TCP, port: 6379 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: participants-accept-switch-only
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: ["bci-cbs", "stdb-cbs", "wallet-sim"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["switch-api", "sla-sweeper"]
+      ports:
+        - { protocol: TCP, port: 8444 }
+        - { protocol: TCP, port: 8445 }
+        - { protocol: TCP, port: 8446 }

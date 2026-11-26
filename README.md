@@ -248,6 +248,35 @@ Once healthy:
 - **Standard Bank Core Banking Simulator (mTLS):** `https://localhost:8445`
 - **Mobile Wallet Adapter Simulator (mTLS):** `https://localhost:8446`
 
+### Local Kubernetes & Terraform IaC (Docker Desktop Kubernetes)
+
+The entire 10-container mTLS microservices topology is also defined declaratively as **Kubernetes Kustomize manifests (`infra/k8s/`)** orchestrated by **Terraform IaC (`infra/terraform/`)**—strictly local (no remote cloud deployment):
+
+- **Terraform (`infra/terraform/`):** Generates the `METIX-SIMOREDE-ROOT-CA` and all 4 per-service mTLS X.509 certificates (`modules/pki`), creates the `metix-switch` namespace and Secrets (`modules/k8s_foundation`), and applies/destroys the Kustomize overlay.
+- **Kubernetes (`infra/k8s/`):** Runs 4 persistent StatefulSets (`postgres`, `bci-postgres`, `stdb-postgres`, `redis`), 6 Deployments (`bci-cbs`, `stdb-cbs`, `wallet-sim`, `switch-api`, `sla-sweeper`, `frontend`) with mTLS `exec` probes, and `NetworkPolicy` resources enforcing **Bank Core Isolation** between participant databases.
+- **GitHub Actions (`.github/workflows/`):**
+  - `ci-app.yml`: Backend `ruff` lint/format + all 12 `pytest` integration tests against 3× PostgreSQL 16 + Redis 7, Next.js `tsc` + production build, and local container builds.
+  - `ci-infra.yml`: `terraform fmt`/`validate`, `tflint`, `kubectl kustomize` + `kubeconform` schema validation, and an ephemeral `kind` cluster E2E smoke test (`scripts/k8s-smoke-test.py`) executing a real mTLS interbank transfer in CI.
+
+**Prerequisites:** Docker Desktop with **Kubernetes enabled** (*Settings → Kubernetes → Enable Kubernetes*), `kubectl`, and `terraform` (`>= 1.9`).
+
+```powershell
+# Windows (PowerShell)
+.\scripts\local-k8s.ps1 build   # Build metix-backend:local & metix-frontend:local
+.\scripts\local-k8s.ps1 up      # Terraform init + apply (PKI, Secrets, Kustomize local overlay)
+.\scripts\local-k8s.ps1 status  # Inspect Pods, Services, PVCs & NetworkPolicies
+.\scripts\local-k8s.ps1 smoke   # Verify mTLS PKI, OAuth2, BCI->STDB transfer & balanced ledger
+.\scripts\local-k8s.ps1 down    # Terraform destroy (clean teardown)
+```
+
+```bash
+# Linux / macOS / WSL
+./scripts/local-k8s.sh build
+./scripts/local-k8s.sh up
+./scripts/local-k8s.sh smoke
+./scripts/local-k8s.sh down
+```
+
 ### Connecting All 3 PostgreSQL 16 Databases in pgAdmin 4 Desktop
 
 Register 3 separate servers in **pgAdmin 4** (*Servers → Register → Server...*):
@@ -295,6 +324,18 @@ bun run --cwd frontend build
 
 ```text
 metix-switch-sim/
+├── .github/workflows/
+│   ├── ci-app.yml                         # Backend ruff + 12 pytest (3x PG16 + Redis), Frontend build, Docker builds
+│   └── ci-infra.yml                       # Terraform fmt/validate/tflint, kubeconform, ephemeral kind E2E smoke test
+├── infra/
+│   ├── k8s/
+│   │   ├── base/                          # StatefulSets (3x PG16, Redis), Deployments, Services, mTLS probes, NetworkPolicies
+│   │   └── overlays/                      # local/ (Docker Desktop LoadBalancer) & ci-kind/ (ephemeral CI cluster)
+│   └── terraform/                         # Local Kubernetes IaC (modules/pki, modules/k8s_foundation, Kustomize apply)
+├── scripts/
+│   ├── local-k8s.ps1                      # Windows PowerShell helper (build / up / redeploy / status / smoke / down)
+│   ├── local-k8s.sh                       # Bash helper (build / up / redeploy / status / smoke / down)
+│   └── k8s-smoke-test.py                  # Stdlib E2E smoke test (health, mTLS PKI, OAuth2, BCI->STDB transfer, ledger)
 ├── INVARIANTS.md                          # Financial, ISO 8583, concurrency & SPIM SLA invariants
 ├── docker-compose.yml                     # 10-container mTLS stack (3× PG16, Redis, PKI, BCI/STDB CBS, Wallet, Switch, Sweeper, UI)
 ├── docs/

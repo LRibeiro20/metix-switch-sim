@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (git-ignored) to override defaults.
+
+# Docker Desktop Kubernetes (default)
+kube_context      = "docker-desktop"
+kustomize_overlay = "local"
+
+# Ephemeral kind cluster (what GitHub Actions uses)
+# kube_context      = "kind-metix-ci"
+# kustomize_overlay = "ci-kind"
+
+# kubeconfig_path = "~/.kube/config"
+# rollout_timeout = "900s"

@@ -1,0 +1,302 @@
+# Three isolated PostgreSQL 16 databases (Switch, BCI CBS, Standard Bank CBS)
+# and one persistent Redis 7 (AOF + RDB) — each a single-replica StatefulSet
+# with its own PersistentVolumeClaim.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: switch-database
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: switch-database
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: switch-database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: switch-user }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: switch-password }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: switch-db }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 1000m, memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bci-postgres
+  labels:
+    app.kubernetes.io/name: bci-postgres
+    app.kubernetes.io/component: cbs-database
+spec:
+  selector:
+    app.kubernetes.io/name: bci-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: bci-postgres
+  labels:
+    app.kubernetes.io/name: bci-postgres
+    app.kubernetes.io/component: cbs-database
+spec:
+  serviceName: bci-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bci-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bci-postgres
+        app.kubernetes.io/component: cbs-database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: bci-user }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: bci-password }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: bci-db }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 1000m, memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stdb-postgres
+  labels:
+    app.kubernetes.io/name: stdb-postgres
+    app.kubernetes.io/component: cbs-database
+spec:
+  selector:
+    app.kubernetes.io/name: stdb-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stdb-postgres
+  labels:
+    app.kubernetes.io/name: stdb-postgres
+    app.kubernetes.io/component: cbs-database
+spec:
+  serviceName: stdb-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: stdb-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: stdb-postgres
+        app.kubernetes.io/component: cbs-database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: stdb-user }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: stdb-password }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: stdb-db }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 1000m, memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: cache
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # AOF + RDB persistence: idempotency locks, Notice 1/GBM/2026 daily caps,
+          # fraud velocity windows and Ed25519 nonces survive pod restarts.
+          args: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

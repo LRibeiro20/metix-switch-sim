@@ -1,0 +1,150 @@
+# METIX Central Switch API and the dedicated 25-second SPIM SLA sweeper.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: switch-api
+  labels:
+    app.kubernetes.io/name: switch-api
+    app.kubernetes.io/component: switch
+spec:
+  selector:
+    app.kubernetes.io/name: switch-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switch-api
+  labels:
+    app.kubernetes.io/name: switch-api
+    app.kubernetes.io/component: switch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: switch-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: switch-api
+        app.kubernetes.io/component: switch
+    spec:
+      initContainers:
+        - name: wait-for-dependencies
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              for target in postgres:5432 redis:6379 bci-cbs:8444 stdb-cbs:8445 wallet-sim:8446; do
+                host="${target%%:*}"; port="${target##*:}"
+                until nc -z -w 2 "$host" "$port"; do echo "waiting for $target"; sleep 2; done
+              done
+      containers:
+        - name: switch-api
+          image: metix-backend:local
+          command: ["uv", "run", "--no-dev", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: metix-switch-config
+            - secretRef:
+                name: metix-app-secrets
+          env:
+            - { name: SERVICE_ID, value: switch-api }
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: switch-url }
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 8
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 150m, memory: 256Mi }
+            limits: { cpu: 1500m, memory: 1Gi }
+          volumeMounts:
+            - name: pki
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: pki
+          secret:
+            secretName: metix-pki-certs
+            defaultMode: 0440
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sla-sweeper
+  labels:
+    app.kubernetes.io/name: sla-sweeper
+    app.kubernetes.io/component: sla-worker
+spec:
+  # Exactly one sweeper; rows are claimed with SELECT ... FOR UPDATE SKIP LOCKED,
+  # so Recreate avoids two sweepers overlapping during a rollout.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sla-sweeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sla-sweeper
+        app.kubernetes.io/component: sla-worker
+    spec:
+      initContainers:
+        # Wait until switch-api has finished schema creation + seeding to avoid
+        # concurrent create_all() races on metix_switch.
+        - name: wait-for-switch-api
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -T 3 -O /dev/null http://switch-api:8000/health; do echo "waiting for switch-api"; sleep 3; done
+      containers:
+        - name: sla-sweeper
+          image: metix-backend:local
+          command: ["uv", "run", "--no-dev", "python", "-m", "app.workers.sla_sweeper"]
+          envFrom:
+            - configMapRef:
+                name: metix-switch-config
+            - secretRef:
+                name: metix-app-secrets
+          env:
+            - { name: SERVICE_ID, value: switch-api }
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: metix-db-credentials, key: switch-url }
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { cpu: 1000m, memory: 512Mi }
+          volumeMounts:
+            - name: pki
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: pki
+          secret:
+            secretName: metix-pki-certs
+            defaultMode: 0440

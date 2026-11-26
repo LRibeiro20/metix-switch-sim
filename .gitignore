@@ -14,8 +14,20 @@ out/
 .env
 .env.local
 
-# GEMINI 
+# Terraform (local state & working dirs — .terraform.lock.hcl is tracked)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# GEMINI
 .gemini.md
 GEMINI.md
 GEMINI
-    

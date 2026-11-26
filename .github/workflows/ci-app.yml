@@ -1,0 +1,170 @@
+name: Application CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - ".github/workflows/ci-app.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - ".github/workflows/ci-app.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-quality-and-tests:
+    name: Backend Lint, Format & 12 Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: metix
+          POSTGRES_PASSWORD: metix_secret
+          POSTGRES_DB: metix_switch
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U metix -d metix_switch"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      bci-postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bci_user
+          POSTGRES_PASSWORD: bci_secret
+          POSTGRES_DB: bci_cbs
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd="pg_isready -U bci_user -d bci_cbs"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      stdb-postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: stdb_user
+          POSTGRES_PASSWORD: stdb_secret
+          POSTGRES_DB: stdb_cbs
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd="pg_isready -U stdb_user -d stdb_cbs"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://metix:metix_secret@localhost:5433/metix_switch
+      TEST_BCI_DATABASE_URL: postgresql+asyncpg://bci_user:bci_secret@localhost:5434/bci_cbs
+      TEST_STDB_DATABASE_URL: postgresql+asyncpg://stdb_user:stdb_secret@localhost:5435/stdb_cbs
+      TEST_REDIS_URL: redis://localhost:6380/1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.14
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "backend/uv.lock"
+          python-version: "3.14"
+
+      - name: Sync backend dependencies
+        working-directory: backend
+        run: uv sync --frozen --python 3.14
+
+      - name: Ruff lint
+        working-directory: backend
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        working-directory: backend
+        run: uv run ruff format --check .
+
+      - name: Run integration test suite (3x PostgreSQL 16 + Redis 7)
+        working-directory: backend
+        run: uv run pytest -v
+
+  frontend-build:
+    name: Frontend Type-Check & Next.js Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: TypeScript type-check
+        working-directory: frontend
+        run: bunx tsc --noEmit
+
+      - name: Production Next.js build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: bun run build
+
+  container-builds:
+    name: Build Local Container Images
+    runs-on: ubuntu-latest
+    needs: [backend-quality-and-tests, frontend-build]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build metix-backend image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          load: true
+          tags: metix-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build metix-frontend image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: metix-frontend:ci
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost:8000
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
