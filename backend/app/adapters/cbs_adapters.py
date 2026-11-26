@@ -22,6 +22,8 @@ from shared.schemas import (
     CbsDebitCaptureRequest,
     CbsDebitReleaseRequest,
     CbsHoldActionResponse,
+    CbsInternalTransferRequest,
+    CbsInternalTransferResponse,
     CbsRestrictionUpdateRequest,
     CbsTransactionOut,
     ReconFaultInjectRequest,
@@ -103,6 +105,36 @@ class CoreBankingHttpAdapter(HttpSignedBankAdapter):
         )
         resp.raise_for_status()
         return CbsHoldActionResponse.model_validate(resp.json())
+
+    async def execute_internal_transfer(
+        self, req: CbsInternalTransferRequest
+    ) -> CbsInternalTransferResponse:
+        try:
+            resp = await self._request(
+                "POST",
+                "/cbs/v1/transfers/internal",
+                json_body=req.model_dump(mode="json"),
+                timeout_seconds=8.0,
+            )
+        except httpx.HTTPError as exc:
+            logger.error("CBS %s internal transfer transport error: %s", self.bank_code, exc)
+            await self._record_circuit_result(False)
+            return CbsInternalTransferResponse(
+                idempotent_replay=False,
+                approved=False,
+                bank_code=self.bank_code,
+                response_code="91",
+                reason=f"CBS {self.bank_code} unreachable for on-us transfer: {exc}",
+                originator_account_number=req.originator_account_number,
+                beneficiary_account_number=req.beneficiary_account_number,
+                amount_centavos=req.amount_centavos,
+            )
+
+        if resp.status_code == 400:
+            detail = resp.json().get("detail", "Invalid on-us transfer request")
+            raise ValueError(str(detail))
+        resp.raise_for_status()
+        return CbsInternalTransferResponse.model_validate(resp.json())
 
     async def send_iso_message(
         self,

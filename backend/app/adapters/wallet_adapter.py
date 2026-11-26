@@ -22,6 +22,8 @@ from shared.schemas import (
     CbsDebitCaptureRequest,
     CbsDebitReleaseRequest,
     CbsHoldActionResponse,
+    CbsInternalTransferRequest,
+    CbsInternalTransferResponse,
     CbsRestrictionUpdateRequest,
     CbsTransactionOut,
     ReconFaultInjectRequest,
@@ -96,6 +98,13 @@ class MobileWalletAdapter(HttpSignedBankAdapter):
             status="RELEASED",
             available_balance_centavos=0,
             ledger_balance_centavos=0,
+        )
+
+    async def execute_internal_transfer(
+        self, req: CbsInternalTransferRequest
+    ) -> CbsInternalTransferResponse:
+        raise NotImplementedError(
+            f"Direct intrabank book transfers are not supported by wallet adapter {self.bank_code}"
         )
 
     async def send_iso_message(

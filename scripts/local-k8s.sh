@@ -68,6 +68,7 @@ case "${ACTION}" in
     terraform -chdir="${TF_DIR}" destroy -auto-approve \
       -var="kube_context=${CONTEXT}" \
       -var="kustomize_overlay=${OVERLAY}"
+    kubectl --context "${CONTEXT}" -n "${NAMESPACE}" delete pvc --all --ignore-not-found >/dev/null 2>&1 || true
     ;;
   *)
     echo "Usage: $0 <build|up|redeploy|status|smoke|down> [context] [overlay]" >&2

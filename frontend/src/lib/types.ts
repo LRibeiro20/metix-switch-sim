@@ -93,9 +93,30 @@ export interface SwitchTransaction {
   journal_entries: JournalEntry[];
 }
 
+export interface CbsInternalTransferResponse {
+  idempotent_replay: boolean;
+  approved: boolean;
+  bank_code: string;
+  cbs_ref: string | null;
+  auth_id: string | null;
+  response_code: string;
+  reason: string | null;
+  originator_account_number: string;
+  beneficiary_account_number: string;
+  amount_centavos: number;
+  currency: string;
+  originator_available_balance_centavos: number | null;
+  originator_ledger_balance_centavos: number | null;
+  beneficiary_available_balance_centavos: number | null;
+  beneficiary_ledger_balance_centavos: number | null;
+  processing_latency_ms: number;
+}
+
 export interface TransferResponse {
   idempotent_replay: boolean;
-  transaction: SwitchTransaction;
+  routing_rail: "METIX_SPIM" | "CBS_ON_US";
+  transaction: SwitchTransaction | null;
+  on_us_transfer?: CbsInternalTransferResponse | null;
 }
 
 export interface AccountInfo {

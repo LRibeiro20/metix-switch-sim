@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
+
+from cryptography.exceptions import InvalidTag
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cbs.db.models import CbsAccount, CbsAccountTier
 from shared.security import FieldEncryptor
+
+logger = logging.getLogger(__name__)
 
 BANK_CLEARING_GL_ACCOUNT: dict[str, str] = {
     "BCI_MZ": "BCI-CLEARING-GL-943",
@@ -97,9 +102,20 @@ async def seed_cbs_database(
         existing = (
             await session.execute(select(CbsAccount).where(CbsAccount.account_number == acct_no))
         ).scalar_one_or_none()
-        if existing is not None:
-            continue
         holder_name = str(item["holder_name"])
+        if existing is not None:
+            try:
+                encryptor.decrypt(existing.holder_name_enc)
+            except InvalidTag, ValueError:
+                logger.warning(
+                    "Re-encrypting seeded CBS account %s (%s) after ENCRYPTION_KEY rotation",
+                    acct_no,
+                    bank_code,
+                )
+                existing.holder_name_enc = encryptor.encrypt(holder_name)
+                existing.holder_name_hash = encryptor.blind_index(holder_name)
+                existing.holder_name_masked = encryptor.mask_holder_name(holder_name)
+            continue
         bal = int(item["balance_centavos"])
         acct = CbsAccount(
             account_number=acct_no,

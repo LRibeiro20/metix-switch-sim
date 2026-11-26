@@ -4,12 +4,15 @@ import asyncio
 import json
 import secrets
 import string
+import time
 import uuid
 from datetime import datetime
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -37,6 +40,8 @@ from shared.schemas import (
     CbsDebitCaptureRequest,
     CbsDebitReleaseRequest,
     CbsHoldActionResponse,
+    CbsInternalTransferRequest,
+    CbsInternalTransferResponse,
     CbsRestrictionUpdateRequest,
     CbsTransactionOut,
     ReconFaultInjectRequest,
@@ -317,20 +322,23 @@ class CbsCoreEngine:
                     )
 
                 # Optimistic lock CAS on available_balance_centavos ONLY (ledger stays unchanged)
-                res = await session.execute(
-                    update(CbsAccount)
-                    .where(
-                        CbsAccount.id == acct.id,
-                        CbsAccount.version == acct.version,
-                        CbsAccount.available_balance_centavos >= req.amount_centavos,
-                    )
-                    .values(
-                        available_balance_centavos=(
-                            CbsAccount.available_balance_centavos - req.amount_centavos
-                        ),
-                        version=CbsAccount.version + 1,
-                        updated_at=func.now(),
-                    )
+                res = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        update(CbsAccount)
+                        .where(
+                            CbsAccount.id == acct.id,
+                            CbsAccount.version == acct.version,
+                            CbsAccount.available_balance_centavos >= req.amount_centavos,
+                        )
+                        .values(
+                            available_balance_centavos=(
+                                CbsAccount.available_balance_centavos - req.amount_centavos
+                            ),
+                            version=CbsAccount.version + 1,
+                            updated_at=func.now(),
+                        )
+                    ),
                 )
                 if res.rowcount != 1:
                     await self._release_lua(
@@ -436,18 +444,21 @@ class CbsCoreEngine:
                 )
                 conflict = False
                 for aid, ver, ledger_delta, avail_delta in updates:
-                    res = await session.execute(
-                        update(CbsAccount)
-                        .where(CbsAccount.id == aid, CbsAccount.version == ver)
-                        .values(
-                            ledger_balance_centavos=CbsAccount.ledger_balance_centavos
-                            + ledger_delta,
-                            available_balance_centavos=(
-                                CbsAccount.available_balance_centavos + avail_delta
-                            ),
-                            version=CbsAccount.version + 1,
-                            updated_at=func.now(),
-                        )
+                    res = cast(
+                        CursorResult[Any],
+                        await session.execute(
+                            update(CbsAccount)
+                            .where(CbsAccount.id == aid, CbsAccount.version == ver)
+                            .values(
+                                ledger_balance_centavos=CbsAccount.ledger_balance_centavos
+                                + ledger_delta,
+                                available_balance_centavos=(
+                                    CbsAccount.available_balance_centavos + avail_delta
+                                ),
+                                version=CbsAccount.version + 1,
+                                updated_at=func.now(),
+                            )
+                        ),
                     )
                     if res.rowcount != 1:
                         conflict = True
@@ -537,16 +548,19 @@ class CbsCoreEngine:
                         ledger_balance_centavos=acct.ledger_balance_centavos,
                     )
 
-                res = await session.execute(
-                    update(CbsAccount)
-                    .where(CbsAccount.id == acct.id, CbsAccount.version == acct.version)
-                    .values(
-                        available_balance_centavos=(
-                            CbsAccount.available_balance_centavos + hold.amount_centavos
-                        ),
-                        version=CbsAccount.version + 1,
-                        updated_at=func.now(),
-                    )
+                res = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        update(CbsAccount)
+                        .where(CbsAccount.id == acct.id, CbsAccount.version == acct.version)
+                        .values(
+                            available_balance_centavos=(
+                                CbsAccount.available_balance_centavos + hold.amount_centavos
+                            ),
+                            version=CbsAccount.version + 1,
+                            updated_at=func.now(),
+                        )
+                    ),
                 )
                 if res.rowcount != 1:
                     await session.rollback()
@@ -577,6 +591,425 @@ class CbsCoreEngine:
                 )
 
         raise RuntimeError("Optimistic lock retries exhausted releasing CBS hold")
+
+    async def _load_existing_on_us_response(
+        self, req: CbsInternalTransferRequest
+    ) -> CbsInternalTransferResponse | None:
+        debit_key = f"onus:{req.idempotency_key}:DEBIT"
+        async with self.session_factory() as session:
+            tx = (
+                await session.execute(
+                    select(CbsTransaction)
+                    .options(selectinload(CbsTransaction.account))
+                    .where(CbsTransaction.idempotency_key == debit_key)
+                )
+            ).scalar_one_or_none()
+            if tx is None:
+                return None
+            ben = (
+                await session.execute(
+                    select(CbsAccount).where(CbsAccount.account_number == tx.counterparty_account)
+                )
+            ).scalar_one_or_none()
+            return CbsInternalTransferResponse(
+                idempotent_replay=True,
+                approved=tx.status == CbsTxStatus.POSTED.value,
+                bank_code=self.settings.bank_code,
+                cbs_ref=tx.cbs_ref,
+                auth_id=tx.auth_id,
+                response_code=tx.response_code or "00",
+                originator_account_number=tx.account.account_number,
+                beneficiary_account_number=tx.counterparty_account,
+                amount_centavos=tx.amount_centavos,
+                currency=tx.currency,
+                originator_available_balance_centavos=tx.account.available_balance_centavos,
+                originator_ledger_balance_centavos=tx.account.ledger_balance_centavos,
+                beneficiary_available_balance_centavos=(
+                    ben.available_balance_centavos if ben else None
+                ),
+                beneficiary_ledger_balance_centavos=ben.ledger_balance_centavos if ben else None,
+                processing_latency_ms=0,
+            )
+
+    async def execute_internal_transfer(
+        self, req: CbsInternalTransferRequest, *, signature_verified: bool = True
+    ) -> CbsInternalTransferResponse:
+        """Execute an atomic same-bank (on-us) book transfer without METIX/SPIM."""
+        started = time.perf_counter()
+        if req.amount_centavos <= 0:
+            raise ValueError("amount_centavos must be a positive integer")
+        if req.originator_account_number == req.beneficiary_account_number:
+            raise ValueError("Originator and beneficiary accounts must be distinct")
+
+        idemp_redis_key = f"cbs:{self.settings.bank_code}:onus:idemp:{req.idempotency_key}"
+        acquired = await self.redis.set(idemp_redis_key, "PENDING", nx=True, ex=3600)
+        if not acquired:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                raw = await self.redis.get(idemp_redis_key)
+                if raw is not None and raw != b"PENDING":
+                    text = raw.decode() if isinstance(raw, bytes) else str(raw)
+                    cached = CbsInternalTransferResponse.model_validate_json(text)
+                    return cached.model_copy(update={"idempotent_replay": True})
+                existing = await self._load_existing_on_us_response(req)
+                if existing is not None:
+                    return existing
+                await asyncio.sleep(0.03)
+            existing = await self._load_existing_on_us_response(req)
+            if existing is not None:
+                return existing
+            raise RuntimeError(
+                f"Duplicate on-us transfer for idempotency_key={req.idempotency_key} is still "
+                "initializing"
+            )
+
+        async def _finalize(resp: CbsInternalTransferResponse) -> CbsInternalTransferResponse:
+            await self.redis.set(idemp_redis_key, resp.model_dump_json(), ex=3600)
+            return resp
+
+        try:
+            existing = await self._load_existing_on_us_response(req)
+            if existing is not None:
+                return await _finalize(existing)
+
+            chaos = await self.get_chaos()
+            if chaos.offline:
+                return await _finalize(
+                    CbsInternalTransferResponse(
+                        idempotent_replay=False,
+                        approved=False,
+                        bank_code=self.settings.bank_code,
+                        response_code="91",
+                        reason=(
+                            f"{self.settings.bank_code} CBS simulator is in offline "
+                            "maintenance mode"
+                        ),
+                        originator_account_number=req.originator_account_number,
+                        beneficiary_account_number=req.beneficiary_account_number,
+                        amount_centavos=req.amount_centavos,
+                        processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                    )
+                )
+
+            debit_idemp_key = f"onus:{req.idempotency_key}:DEBIT"
+            credit_idemp_key = f"onus:{req.idempotency_key}:CREDIT"
+
+            for _attempt in range(6):
+                async with self.session_factory() as session:
+                    rows = (
+                        await session.execute(
+                            select(CbsAccount)
+                            .where(
+                                CbsAccount.account_number.in_(
+                                    [req.originator_account_number, req.beneficiary_account_number]
+                                )
+                            )
+                            .execution_options(populate_existing=True)
+                        )
+                    ).scalars()
+                    by_no = {a.account_number: a for a in rows}
+                    orig = by_no.get(req.originator_account_number)
+                    ben = by_no.get(req.beneficiary_account_number)
+
+                    if orig is None or ben is None:
+                        missing = (
+                            req.originator_account_number
+                            if orig is None
+                            else req.beneficiary_account_number
+                        )
+                        return await _finalize(
+                            CbsInternalTransferResponse(
+                                idempotent_replay=False,
+                                approved=False,
+                                bank_code=self.settings.bank_code,
+                                response_code="14",
+                                reason=(
+                                    f"Account {missing} not found at {self.settings.bank_code}"
+                                ),
+                                originator_account_number=req.originator_account_number,
+                                beneficiary_account_number=req.beneficiary_account_number,
+                                amount_centavos=req.amount_centavos,
+                                processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        )
+
+                    if orig.status in (
+                        CbsAccountStatus.FROZEN.value,
+                        CbsAccountStatus.CLOSED.value,
+                        CbsAccountStatus.PND.value,
+                    ):
+                        return await _finalize(
+                            CbsInternalTransferResponse(
+                                idempotent_replay=False,
+                                approved=False,
+                                bank_code=self.settings.bank_code,
+                                response_code="62",
+                                reason=(
+                                    f"Originator account {orig.account_number} restricted "
+                                    f"({orig.status}) at {self.settings.bank_code}"
+                                ),
+                                originator_account_number=orig.account_number,
+                                beneficiary_account_number=ben.account_number,
+                                amount_centavos=req.amount_centavos,
+                                originator_available_balance_centavos=orig.available_balance_centavos,
+                                originator_ledger_balance_centavos=orig.ledger_balance_centavos,
+                                beneficiary_available_balance_centavos=ben.available_balance_centavos,
+                                beneficiary_ledger_balance_centavos=ben.ledger_balance_centavos,
+                                processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        )
+
+                    if ben.status in (
+                        CbsAccountStatus.FROZEN.value,
+                        CbsAccountStatus.CLOSED.value,
+                        CbsAccountStatus.PNC.value,
+                    ):
+                        return await _finalize(
+                            CbsInternalTransferResponse(
+                                idempotent_replay=False,
+                                approved=False,
+                                bank_code=self.settings.bank_code,
+                                response_code="62",
+                                reason=(
+                                    f"Beneficiary account {ben.account_number} restricted "
+                                    f"({ben.status}) at {self.settings.bank_code}"
+                                ),
+                                originator_account_number=orig.account_number,
+                                beneficiary_account_number=ben.account_number,
+                                amount_centavos=req.amount_centavos,
+                                originator_available_balance_centavos=orig.available_balance_centavos,
+                                originator_ledger_balance_centavos=orig.ledger_balance_centavos,
+                                beneficiary_available_balance_centavos=ben.available_balance_centavos,
+                                beneficiary_ledger_balance_centavos=ben.ledger_balance_centavos,
+                                processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        )
+
+                    if req.amount_centavos > orig.per_tx_limit_centavos:
+                        return await _finalize(
+                            CbsInternalTransferResponse(
+                                idempotent_replay=False,
+                                approved=False,
+                                bank_code=self.settings.bank_code,
+                                response_code="61",
+                                reason=(
+                                    f"Exceeds {self.settings.bank_code} per-transaction limit "
+                                    f"({orig.per_tx_limit_centavos / 100:,.2f} MT)"
+                                ),
+                                originator_account_number=orig.account_number,
+                                beneficiary_account_number=ben.account_number,
+                                amount_centavos=req.amount_centavos,
+                                originator_available_balance_centavos=orig.available_balance_centavos,
+                                originator_ledger_balance_centavos=orig.ledger_balance_centavos,
+                                beneficiary_available_balance_centavos=ben.available_balance_centavos,
+                                beneficiary_ledger_balance_centavos=ben.ledger_balance_centavos,
+                                processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        )
+
+                    if orig.available_balance_centavos < req.amount_centavos:
+                        return await _finalize(
+                            CbsInternalTransferResponse(
+                                idempotent_replay=False,
+                                approved=False,
+                                bank_code=self.settings.bank_code,
+                                response_code="51",
+                                reason=(
+                                    f"Insufficient available balance on {orig.account_number}: "
+                                    f"{orig.available_balance_centavos} < "
+                                    f"{req.amount_centavos} centavos"
+                                ),
+                                originator_account_number=orig.account_number,
+                                beneficiary_account_number=ben.account_number,
+                                amount_centavos=req.amount_centavos,
+                                originator_available_balance_centavos=orig.available_balance_centavos,
+                                originator_ledger_balance_centavos=orig.ledger_balance_centavos,
+                                beneficiary_available_balance_centavos=ben.available_balance_centavos,
+                                beneficiary_ledger_balance_centavos=ben.ledger_balance_centavos,
+                                processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        )
+
+                    daily_res = await self._reserve_lua(
+                        keys=[self._daily_key(orig.account_number)],
+                        args=[req.amount_centavos, orig.daily_limit_centavos, 172_800],
+                    )
+                    if int(daily_res[0]) != 1:
+                        return await _finalize(
+                            CbsInternalTransferResponse(
+                                idempotent_replay=False,
+                                approved=False,
+                                bank_code=self.settings.bank_code,
+                                response_code="61",
+                                reason=(
+                                    f"Exceeds {self.settings.bank_code} CBS daily account limit "
+                                    f"({orig.daily_limit_centavos / 100:,.2f} MT)"
+                                ),
+                                originator_account_number=orig.account_number,
+                                beneficiary_account_number=ben.account_number,
+                                amount_centavos=req.amount_centavos,
+                                originator_available_balance_centavos=orig.available_balance_centavos,
+                                originator_ledger_balance_centavos=orig.ledger_balance_centavos,
+                                beneficiary_available_balance_centavos=ben.available_balance_centavos,
+                                beneficiary_ledger_balance_centavos=ben.ledger_balance_centavos,
+                                processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        )
+
+                    orig_avail_after = orig.available_balance_centavos - req.amount_centavos
+                    orig_ledger_after = orig.ledger_balance_centavos - req.amount_centavos
+                    ben_avail_after = ben.available_balance_centavos + req.amount_centavos
+                    ben_ledger_after = ben.ledger_balance_centavos + req.amount_centavos
+
+                    # Deterministic UUID-ordered CAS directly between customer accounts (no GL)
+                    updates = sorted(
+                        [
+                            (orig.id, orig.version, -req.amount_centavos, True),
+                            (ben.id, ben.version, +req.amount_centavos, False),
+                        ],
+                        key=lambda item: item[0],
+                    )
+                    conflict = False
+                    for aid, ver, delta, check_avail in updates:
+                        conds = [CbsAccount.id == aid, CbsAccount.version == ver]
+                        if check_avail:
+                            conds.append(
+                                CbsAccount.available_balance_centavos >= req.amount_centavos
+                            )
+                        res = cast(
+                            CursorResult[Any],
+                            await session.execute(
+                                update(CbsAccount)
+                                .where(*conds)
+                                .values(
+                                    ledger_balance_centavos=CbsAccount.ledger_balance_centavos
+                                    + delta,
+                                    available_balance_centavos=(
+                                        CbsAccount.available_balance_centavos + delta
+                                    ),
+                                    version=CbsAccount.version + 1,
+                                    updated_at=func.now(),
+                                )
+                            ),
+                        )
+                        if res.rowcount != 1:
+                            conflict = True
+                            break
+
+                    if conflict:
+                        await self._release_lua(
+                            keys=[self._daily_key(orig.account_number)],
+                            args=[req.amount_centavos],
+                        )
+                        await session.rollback()
+                        continue
+
+                    token = uuid.uuid4().hex[:10].upper()
+                    cbs_ref = f"ONUS-{self.settings.bank_code}-{token}"
+                    auth_id = _gen_auth_id()
+                    rrn = f"ONUS{token[:8]}"
+
+                    debit_tx = CbsTransaction(
+                        cbs_ref=cbs_ref,
+                        switch_tx_id=None,
+                        idempotency_key=debit_idemp_key,
+                        stan="000000",
+                        rrn=rrn,
+                        tx_type=CbsTxType.ON_US_DEBIT.value,
+                        account_id=orig.id,
+                        counterparty_bank=self.settings.bank_code,
+                        counterparty_account=ben.account_number,
+                        amount_centavos=req.amount_centavos,
+                        currency="943",
+                        status=CbsTxStatus.POSTED.value,
+                        auth_id=auth_id,
+                        response_code="00",
+                        signature_verified=signature_verified,
+                    )
+                    credit_tx = CbsTransaction(
+                        cbs_ref=f"{cbs_ref}-CR",
+                        switch_tx_id=None,
+                        idempotency_key=credit_idemp_key,
+                        stan="000000",
+                        rrn=rrn,
+                        tx_type=CbsTxType.ON_US_CREDIT.value,
+                        account_id=ben.id,
+                        counterparty_bank=self.settings.bank_code,
+                        counterparty_account=orig.account_number,
+                        amount_centavos=req.amount_centavos,
+                        currency="943",
+                        status=CbsTxStatus.POSTED.value,
+                        auth_id=auth_id,
+                        response_code="00",
+                        signature_verified=signature_verified,
+                    )
+                    session.add_all([debit_tx, credit_tx])
+                    await session.flush()
+
+                    je = CbsJournalEntry(
+                        cbs_transaction_id=debit_tx.id,
+                        entry_type="ON_US_TRANSFER",
+                        description=(
+                            f"Direct on-us book transfer {cbs_ref}: "
+                            f"{orig.account_number} -> {ben.account_number}"
+                        ),
+                    )
+                    session.add(je)
+                    await session.flush()
+                    session.add_all(
+                        [
+                            CbsJournalPosting(
+                                journal_entry_id=je.id,
+                                account_id=orig.id,
+                                direction="DEBIT",
+                                amount_centavos=req.amount_centavos,
+                            ),
+                            CbsJournalPosting(
+                                journal_entry_id=je.id,
+                                account_id=ben.id,
+                                direction="CREDIT",
+                                amount_centavos=req.amount_centavos,
+                            ),
+                        ]
+                    )
+                    await session.commit()
+
+                    return await _finalize(
+                        CbsInternalTransferResponse(
+                            idempotent_replay=False,
+                            approved=True,
+                            bank_code=self.settings.bank_code,
+                            cbs_ref=cbs_ref,
+                            auth_id=auth_id,
+                            response_code="00",
+                            originator_account_number=orig.account_number,
+                            beneficiary_account_number=ben.account_number,
+                            amount_centavos=req.amount_centavos,
+                            currency="943",
+                            originator_available_balance_centavos=orig_avail_after,
+                            originator_ledger_balance_centavos=orig_ledger_after,
+                            beneficiary_available_balance_centavos=ben_avail_after,
+                            beneficiary_ledger_balance_centavos=ben_ledger_after,
+                            processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                        )
+                    )
+
+            return await _finalize(
+                CbsInternalTransferResponse(
+                    idempotent_replay=False,
+                    approved=False,
+                    bank_code=self.settings.bank_code,
+                    response_code="96",
+                    reason=("Optimistic lock contention exhausted during CBS on-us book transfer"),
+                    originator_account_number=req.originator_account_number,
+                    beneficiary_account_number=req.beneficiary_account_number,
+                    amount_centavos=req.amount_centavos,
+                    processing_latency_ms=int((time.perf_counter() - started) * 1000),
+                )
+            )
+        except Exception:
+            await self.redis.delete(idemp_redis_key)
+            raise
 
     async def process_iso8583(
         self,
@@ -685,16 +1118,19 @@ class CbsCoreEngine:
                 )
                 conflict = False
                 for aid, ver, delta in updates:
-                    res = await session.execute(
-                        update(CbsAccount)
-                        .where(CbsAccount.id == aid, CbsAccount.version == ver)
-                        .values(
-                            ledger_balance_centavos=CbsAccount.ledger_balance_centavos + delta,
-                            available_balance_centavos=CbsAccount.available_balance_centavos
-                            + delta,
-                            version=CbsAccount.version + 1,
-                            updated_at=func.now(),
-                        )
+                    res = cast(
+                        CursorResult[Any],
+                        await session.execute(
+                            update(CbsAccount)
+                            .where(CbsAccount.id == aid, CbsAccount.version == ver)
+                            .values(
+                                ledger_balance_centavos=CbsAccount.ledger_balance_centavos + delta,
+                                available_balance_centavos=CbsAccount.available_balance_centavos
+                                + delta,
+                                version=CbsAccount.version + 1,
+                                updated_at=func.now(),
+                            )
+                        ),
                     )
                     if res.rowcount != 1:
                         conflict = True

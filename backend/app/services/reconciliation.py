@@ -231,6 +231,9 @@ class ReconciliationService:
 
             # 2. Check CBS -> Switch (Orphaned CBS postings, Duplicate postings, Stale CBS holds)
             for (bank_code, stan, rrn, tx_type), items in cbs_index.items():
+                if tx_type in ("ON_US_DEBIT", "ON_US_CREDIT"):
+                    # Intrabank on-us book transfers settle directly inside CBS without METIX/SPIM
+                    continue
                 posted_items = [i for i in items if i.status == "POSTED"]
                 if len(posted_items) > 1:
                     _add_exc(

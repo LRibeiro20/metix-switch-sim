@@ -21,6 +21,8 @@ from shared.schemas import (
     CbsDebitCaptureRequest,
     CbsDebitReleaseRequest,
     CbsHoldActionResponse,
+    CbsInternalTransferRequest,
+    CbsInternalTransferResponse,
     CbsRestrictionUpdateRequest,
     CbsTransactionOut,
     ReconFaultInjectRequest,
@@ -79,6 +81,9 @@ class BankIntegrationAdapter(Protocol):
     async def authorize_debit(self, req: CbsDebitAuthorizeRequest) -> CbsDebitAuthorizeResponse: ...
     async def capture_debit(self, req: CbsDebitCaptureRequest) -> CbsHoldActionResponse: ...
     async def release_debit(self, req: CbsDebitReleaseRequest) -> CbsHoldActionResponse: ...
+    async def execute_internal_transfer(
+        self, req: CbsInternalTransferRequest
+    ) -> CbsInternalTransferResponse: ...
     async def send_iso_message(
         self,
         msg: Iso8583Message,
@@ -186,7 +191,7 @@ class HttpSignedBankAdapter:
         if self.redis_client is None:
             return "CLOSED"
         raw = await self.redis_client.get(f"metix:cb:fails:{self.bank_code}")
-        fails = int(raw.decode()) if raw else 0
+        fails = int(raw.decode() if isinstance(raw, bytes) else raw) if raw else 0
         if fails >= 5:
             return "OPEN"
         if fails >= 2:

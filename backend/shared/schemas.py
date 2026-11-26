@@ -81,6 +81,33 @@ class CbsHoldActionResponse(BaseModel):
     ledger_balance_centavos: int
 
 
+class CbsInternalTransferRequest(BaseModel):
+    idempotency_key: str = Field(..., min_length=4, max_length=128)
+    originator_account_number: str = Field(..., min_length=6, max_length=32)
+    beneficiary_account_number: str = Field(..., min_length=6, max_length=32)
+    amount_centavos: int = Field(..., gt=0)
+    reference: str | None = Field(default=None, max_length=64)
+
+
+class CbsInternalTransferResponse(BaseModel):
+    idempotent_replay: bool = False
+    approved: bool
+    bank_code: str
+    cbs_ref: str | None = None
+    auth_id: str | None = None
+    response_code: str
+    reason: str | None = None
+    originator_account_number: str
+    beneficiary_account_number: str
+    amount_centavos: int
+    currency: str = "943"
+    originator_available_balance_centavos: int | None = None
+    originator_ledger_balance_centavos: int | None = None
+    beneficiary_available_balance_centavos: int | None = None
+    beneficiary_ledger_balance_centavos: int | None = None
+    processing_latency_ms: int = 0
+
+
 class CbsRestrictionUpdateRequest(BaseModel):
     status: CbsAccountStatus | None = None
     per_tx_limit_centavos: int | None = Field(default=None, gt=0)

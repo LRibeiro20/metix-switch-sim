@@ -4,6 +4,7 @@ import type {
   BankChaosConfig,
   BankConnectivity,
   BankCustomerAccount,
+  CbsInternalTransferResponse,
   FraudCase,
   HealthStatus,
   LedgerSummary,
@@ -120,6 +121,22 @@ export async function submitTransfer(payload: {
   amount_centavos: number;
 }): Promise<TransferResponse> {
   return apiFetch<TransferResponse>("/api/v1/transfers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function submitInternalTransfer(
+  bankCode: string,
+  payload: {
+    idempotency_key: string;
+    originator_account_number: string;
+    beneficiary_account_number: string;
+    amount_centavos: number;
+    reference?: string;
+  }
+): Promise<CbsInternalTransferResponse> {
+  return apiFetch<CbsInternalTransferResponse>(`/api/v1/banks/${bankCode}/transfers/internal`, {
     method: "POST",
     body: JSON.stringify(payload),
   });

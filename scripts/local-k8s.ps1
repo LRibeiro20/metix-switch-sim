@@ -119,5 +119,6 @@ switch ($Action) {
             -var="kube_context=$Context" `
             -var="kustomize_overlay=$Overlay"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        kubectl --context $Context -n $Namespace delete pvc --all --ignore-not-found | Out-Null
     }
 }

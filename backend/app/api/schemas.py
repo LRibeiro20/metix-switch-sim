@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from shared.schemas import CbsInternalTransferResponse
 
 
 class TransferCreateRequest(BaseModel):
@@ -83,7 +85,9 @@ class TransactionOut(BaseModel):
 
 class TransferResponse(BaseModel):
     idempotent_replay: bool
-    transaction: TransactionOut
+    routing_rail: Literal["METIX_SPIM", "CBS_ON_US"] = "METIX_SPIM"
+    transaction: TransactionOut | None = None
+    on_us_transfer: CbsInternalTransferResponse | None = None
 
 
 class AccountOut(BaseModel):

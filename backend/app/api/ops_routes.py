@@ -30,6 +30,8 @@ from app.services.telemetry import TelemetryService
 from shared.schemas import (
     BankChaosConfig,
     CbsAccountStatus,
+    CbsInternalTransferRequest,
+    CbsInternalTransferResponse,
     CbsRestrictionUpdateRequest,
     ReconFaultInjectRequest,
 )
@@ -127,6 +129,63 @@ async def list_single_bank_accounts(bank_code: str, request: Request) -> list[di
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     accts = await adapter.list_accounts()
     return [a.model_dump(mode="json") for a in accts]
+
+
+@router.post(
+    "/banks/{bank_code}/transfers/internal",
+    response_model=CbsInternalTransferResponse,
+)
+async def execute_bank_internal_transfer(
+    bank_code: str,
+    payload: CbsInternalTransferRequest,
+    request: Request,
+    actor: Principal = Depends(require_roles(Role.MAKER, Role.ADMIN, Role.SERVICE_ADAPTER)),
+) -> CbsInternalTransferResponse:
+    """Execute a direct intrabank (on-us) book transfer inside a bank CBS without METIX/SPIM."""
+    registry: AdapterRegistry = request.app.state.adapter_registry
+    try:
+        adapter = registry.get(bank_code)
+        orig_bank = registry.resolve_bank_code_for_account(payload.originator_account_number)
+        ben_bank = registry.resolve_bank_code_for_account(payload.beneficiary_account_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if orig_bank != bank_code or ben_bank != bank_code:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Both accounts must belong to {bank_code} for an on-us internal transfer "
+                f"(got {orig_bank} -> {ben_bank})"
+            ),
+        )
+
+    try:
+        res = await adapter.execute_internal_transfer(payload)
+    except (ValueError, NotImplementedError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not res.idempotent_replay:
+        async with request.app.state.session_factory() as session:
+            await record_audit_log(
+                session,
+                actor_id=actor.subject,
+                actor_role=actor.role.value,
+                action="ON_US_INTERNAL_TRANSFER",
+                resource_type="cbs_internal_transfer",
+                resource_id=res.cbs_ref or payload.idempotency_key,
+                payload_json={
+                    "bank_code": bank_code,
+                    "originator_account": payload.originator_account_number,
+                    "beneficiary_account": payload.beneficiary_account_number,
+                    "amount_centavos": payload.amount_centavos,
+                    "approved": res.approved,
+                    "response_code": res.response_code,
+                    "routing_rail": "CBS_ON_US",
+                },
+            )
+            await session.commit()
+
+    return res
 
 
 @router.post("/banks/{bank_code}/accounts/{account_number}/restrictions")

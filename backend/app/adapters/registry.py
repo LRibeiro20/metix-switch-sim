@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from app.adapters.base import AdapterConnectivity, BankIntegrationAdapter
 from shared.schemas import CbsAccountOut
+
+logger = logging.getLogger(__name__)
 
 # Mozambican NIB/account routing prefixes -> participant institution code
 ACCOUNT_ROUTING_PREFIXES: list[tuple[str, str]] = [
@@ -46,14 +49,21 @@ class AdapterRegistry:
         return bank_code, acct
 
     async def list_all_customer_accounts(self) -> list[CbsAccountOut]:
+        items = list(self._adapters.items())
         results = await asyncio.gather(
-            *(adapter.list_accounts() for adapter in self._adapters.values()),
+            *(adapter.list_accounts() for _, adapter in items),
             return_exceptions=True,
         )
         combined: list[CbsAccountOut] = []
-        for res in results:
+        for (bank_code, _), res in zip(items, results, strict=True):
             if isinstance(res, list):
                 combined.extend(res)
+            else:
+                logger.warning(
+                    "Adapter %s list_accounts() failed: %s",
+                    bank_code,
+                    res,
+                )
         return combined
 
     async def check_all_connectivity(self) -> list[AdapterConnectivity]:

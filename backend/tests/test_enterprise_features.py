@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -7,8 +8,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, update
 
-from app.db.models import AuditLog, SwitchTransaction, TransactionStatus
-from cbs.db.models import CbsAccount
+from app.db.models import (
+    AuditLog,
+    Iso8583MessageLog,
+    JournalEntry,
+    SwitchTransaction,
+    TransactionStatus,
+)
+from cbs.db.models import CbsAccount, CbsJournalEntry, CbsTransaction
 from shared.pki import verify_cert_signed_by_ca
 from shared.security import (
     ROLE_SCOPES,
@@ -20,8 +27,10 @@ from shared.security import (
 from tests.conftest import MultiBankTestEnv
 
 BCI_INDIVIDUAL = "00010012345678"
+BCI_SECOND = "00010055001122"
 BCI_BUSINESS = "00010087654321"
 STDB_INDIVIDUAL = "00030055443322"
+STDB_SECOND = "00030077112233"
 STDB_BUSINESS = "00030099887766"
 
 
@@ -390,3 +399,144 @@ async def test_enterprise_security_mtls_oauth_rbac_signatures_encryption_and_aud
     assert v_bad.status_code == 200
     assert v_bad.json()["valid"] is False
     assert v_bad.json()["broken_at_sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_bank_on_us_transfer_bypasses_metix_spim(
+    clean_env: MultiBankTestEnv,
+) -> None:
+    """Verify same-bank transfers execute directly in CBS without METIX/SPIM, ISO 8583, or MNS."""
+    env = clean_env
+    amount = 1_250_000  # 12,500.00 MT
+
+    # Enable ISO 8583 chaos (drop_0210) on BCI_MZ — must NOT affect on-us book transfers!
+    chaos_res = await env.client.post(
+        "/api/v1/banks/BCI_MZ/chaos",
+        json={"preset": "drop_0210"},
+        headers=env.maker_headers,
+    )
+    assert chaos_res.status_code == 200
+
+    # 1. Transparent proxy via POST /api/v1/transfers (BCI_MZ -> BCI_MZ)
+    idemp_key = f"onus-bci-{uuid.uuid4().hex}"
+    resp = await env.client.post(
+        "/api/v1/transfers",
+        json={
+            "idempotency_key": idemp_key,
+            "originator_account_number": BCI_INDIVIDUAL,
+            "beneficiary_account_number": BCI_SECOND,
+            "amount_centavos": amount,
+        },
+        headers=env.maker_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["routing_rail"] == "CBS_ON_US"
+    assert body["idempotent_replay"] is False
+    assert body["transaction"] is None
+    on_us = body["on_us_transfer"]
+    assert on_us is not None
+    assert on_us["approved"] is True
+    assert on_us["bank_code"] == "BCI_MZ"
+    assert on_us["response_code"] == "00"
+    assert on_us["auth_id"] is not None and len(on_us["auth_id"]) == 6
+    assert on_us["cbs_ref"].startswith("ONUS-BCI_MZ-")
+    assert on_us["originator_available_balance_centavos"] == 50_000_000 - amount
+    assert on_us["originator_ledger_balance_centavos"] == 50_000_000 - amount
+    assert on_us["beneficiary_available_balance_centavos"] == 30_000_000 + amount
+    assert on_us["beneficiary_ledger_balance_centavos"] == 30_000_000 + amount
+
+    # Verify zero METIX/SPIM switch artifacts (no SwitchTransaction, ISO 8583, or Switch Journals)
+    async with env.switch_session_factory() as s:
+        assert len((await s.execute(select(SwitchTransaction))).scalars().all()) == 0
+        assert len((await s.execute(select(Iso8583MessageLog))).scalars().all()) == 0
+        assert len((await s.execute(select(JournalEntry))).scalars().all()) == 0
+
+    # Verify MNS settlement is completely untouched
+    pos = (await env.client.get("/api/v1/settlement/positions")).json()
+    assert pos["unsettled_tx_count"] == 0
+    assert pos["total_gross_volume_centavos"] == 0
+
+    # Verify BCI CBS DB recorded balanced ON_US journal and left Clearing GL at 0
+    async with env.bci_session_factory() as s:
+        gl = (
+            await s.execute(
+                select(CbsAccount).where(CbsAccount.account_number == "BCI-CLEARING-GL-943")
+            )
+        ).scalar_one()
+        assert gl.ledger_balance_centavos == 0
+        assert gl.available_balance_centavos == 0
+        cbs_txs = (await s.execute(select(CbsTransaction))).scalars().all()
+        assert {t.tx_type for t in cbs_txs} == {"ON_US_DEBIT", "ON_US_CREDIT"}
+        assert all(t.switch_tx_id is None for t in cbs_txs)
+        jes = (await s.execute(select(CbsJournalEntry))).scalars().all()
+        assert len(jes) == 1 and jes[0].entry_type == "ON_US_TRANSFER"
+
+    # 2. Concurrent 5x idempotency storm on same-bank transfer via transparent proxy
+    storm_key = f"onus-storm-{uuid.uuid4().hex}"
+    storm_amount = 500_000  # 5,000.00 MT
+    storm_responses = await asyncio.gather(
+        *[
+            env.client.post(
+                "/api/v1/transfers",
+                json={
+                    "idempotency_key": storm_key,
+                    "originator_account_number": BCI_INDIVIDUAL,
+                    "beneficiary_account_number": BCI_SECOND,
+                    "amount_centavos": storm_amount,
+                },
+                headers=env.maker_headers,
+            )
+            for _ in range(5)
+        ]
+    )
+    assert all(r.status_code == 200 for r in storm_responses)
+    storm_bodies = [r.json() for r in storm_responses]
+    assert all(b["routing_rail"] == "CBS_ON_US" for b in storm_bodies)
+    assert sum(1 for b in storm_bodies if not b["idempotent_replay"]) == 1
+    assert sum(1 for b in storm_bodies if b["idempotent_replay"]) == 4
+    assert len({b["on_us_transfer"]["cbs_ref"] for b in storm_bodies}) == 1
+
+    # Confirm only 1 storm debit occurred in bci_cbs
+    async with env.bci_session_factory() as s:
+        orig = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == BCI_INDIVIDUAL))
+        ).scalar_one()
+        ben = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == BCI_SECOND))
+        ).scalar_one()
+        assert orig.available_balance_centavos == 50_000_000 - amount - storm_amount
+        assert ben.available_balance_centavos == 30_000_000 + amount + storm_amount
+
+    # 3. Direct bank endpoint POST /api/v1/banks/STDB_MZ/transfers/internal + cross-bank guard
+    stdb_res = await env.client.post(
+        "/api/v1/banks/STDB_MZ/transfers/internal",
+        json={
+            "idempotency_key": f"onus-stdb-{uuid.uuid4().hex}",
+            "originator_account_number": STDB_INDIVIDUAL,
+            "beneficiary_account_number": STDB_SECOND,
+            "amount_centavos": 300_000,
+        },
+        headers=env.maker_headers,
+    )
+    assert stdb_res.status_code == 200, stdb_res.text
+    assert stdb_res.json()["approved"] is True
+    assert stdb_res.json()["bank_code"] == "STDB_MZ"
+
+    bad_cross = await env.client.post(
+        "/api/v1/banks/STDB_MZ/transfers/internal",
+        json={
+            "idempotency_key": f"onus-cross-{uuid.uuid4().hex}",
+            "originator_account_number": STDB_INDIVIDUAL,
+            "beneficiary_account_number": BCI_INDIVIDUAL,
+            "amount_centavos": 100_000,
+        },
+        headers=env.maker_headers,
+    )
+    assert bad_cross.status_code == 400
+
+    # 4. 3-Way Reconciliation must NOT flag on-us transfers as MISSING_IN_SWITCH
+    recon_res = await env.client.post("/api/v1/reconciliation/run", headers=env.maker_headers)
+    assert recon_res.status_code == 200
+    assert recon_res.json()["run"]["new_exception_count"] == 0
+    assert recon_res.json()["exceptions"] == []

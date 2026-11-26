@@ -17,6 +17,8 @@ from shared.schemas import (
     CbsDebitCaptureRequest,
     CbsDebitReleaseRequest,
     CbsHoldActionResponse,
+    CbsInternalTransferRequest,
+    CbsInternalTransferResponse,
     CbsRestrictionUpdateRequest,
     CbsTransactionOut,
     ReconFaultInjectRequest,
@@ -162,6 +164,19 @@ async def release_cbs_debit(
         return await _engine(request).release_debit(payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/transfers/internal", response_model=CbsInternalTransferResponse)
+async def execute_cbs_internal_transfer(
+    payload: CbsInternalTransferRequest,
+    request: Request,
+    _: Principal = Depends(require_roles(Role.SERVICE_ADAPTER, Role.ADMIN, Role.MAKER)),
+    _sig: dict[str, str] = Depends(_verify_adapter_signature),
+) -> CbsInternalTransferResponse:
+    try:
+        return await _engine(request).execute_internal_transfer(payload, signature_verified=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/iso8583")

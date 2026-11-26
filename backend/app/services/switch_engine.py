@@ -209,6 +209,11 @@ class SwitchEngine:
             ben_bank_code = self.adapters.resolve_bank_code_for_account(
                 req.beneficiary_account_number
             )
+            if orig_bank_code == ben_bank_code:
+                raise ValueError(
+                    f"Same-bank transfers within {orig_bank_code} do not require METIX/SPIM "
+                    "and must execute directly inside the bank's Core Banking System"
+                )
 
             orig_settle_no = SETTLEMENT_ACCOUNT_BY_INSTITUTION[orig_bank_code]
             ben_settle_no = SETTLEMENT_ACCOUNT_BY_INSTITUTION[ben_bank_code]

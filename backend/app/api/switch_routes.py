@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 
+from app.adapters.registry import AdapterRegistry
 from app.api.schemas import (
     AccountOut,
     IsoMessageOut,
@@ -25,10 +26,12 @@ from app.db.models import (
     SwitchTransaction,
 )
 from app.db.seed import METIX_SUSPENSE_ACCOUNT_NUMBER, seed_database
+from app.services.audit import record_audit_log
 from app.services.redis_guard import RedisGuard
 from app.services.switch_engine import SwitchEngine, TransferRequest, load_transaction_full
 from app.workers.sla_sweeper import SlaSweeper
 from shared.iso8583.models import ISO_RESPONSE_DESCRIPTIONS
+from shared.schemas import CbsInternalTransferRequest
 from shared.security import Principal, Role, get_optional_principal
 
 router = APIRouter(tags=["metix-switch"])
@@ -161,6 +164,63 @@ async def create_transfer(
                 detail=f"RBAC denied: role '{principal.role.value}' cannot initiate transfers",
             )
 
+    if payload.originator_account_number == payload.beneficiary_account_number:
+        raise HTTPException(
+            status_code=400, detail="Originator and beneficiary accounts must be distinct"
+        )
+
+    adapters: AdapterRegistry = request.app.state.adapter_registry
+    try:
+        orig_bank_code = adapters.resolve_bank_code_for_account(payload.originator_account_number)
+        ben_bank_code = adapters.resolve_bank_code_for_account(payload.beneficiary_account_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Same-bank (on-us) transfers bypass METIX/SPIM and proxy directly to the bank's CBS
+    if orig_bank_code == ben_bank_code:
+        adapter = adapters.get(orig_bank_code)
+        try:
+            on_us_res = await adapter.execute_internal_transfer(
+                CbsInternalTransferRequest(
+                    idempotency_key=payload.idempotency_key,
+                    originator_account_number=payload.originator_account_number,
+                    beneficiary_account_number=payload.beneficiary_account_number,
+                    amount_centavos=payload.amount_centavos,
+                )
+            )
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if not on_us_res.idempotent_replay:
+            async with request.app.state.session_factory() as session:
+                await record_audit_log(
+                    session,
+                    actor_id=principal.subject if principal else "anonymous",
+                    actor_role=principal.role.value if principal else "SYSTEM",
+                    action="ON_US_INTERNAL_TRANSFER",
+                    resource_type="cbs_internal_transfer",
+                    resource_id=on_us_res.cbs_ref or payload.idempotency_key,
+                    payload_json={
+                        "bank_code": orig_bank_code,
+                        "originator_account": payload.originator_account_number,
+                        "beneficiary_account": payload.beneficiary_account_number,
+                        "amount_centavos": payload.amount_centavos,
+                        "approved": on_us_res.approved,
+                        "response_code": on_us_res.response_code,
+                        "routing_rail": "CBS_ON_US",
+                    },
+                )
+                await session.commit()
+
+        return TransferResponse(
+            idempotent_replay=on_us_res.idempotent_replay,
+            routing_rail="CBS_ON_US",
+            transaction=None,
+            on_us_transfer=on_us_res,
+        )
+
     engine: SwitchEngine = request.app.state.switch_engine
     try:
         result = await engine.initiate_transfer(
@@ -181,7 +241,9 @@ async def create_transfer(
     account_lookup = await _load_account_lookup(request)
     return TransferResponse(
         idempotent_replay=result.idempotent_replay,
+        routing_rail="METIX_SPIM",
         transaction=_serialize_transaction(result.transaction, account_lookup),
+        on_us_transfer=None,
     )
 
 

@@ -559,7 +559,9 @@ export function SwitchDashboard() {
                   bankAccounts={bankAccounts}
                   canInitiate={canInitiateTransfers}
                   onTransferSettled={(tx) => {
-                    setSelectedTxId(tx.id);
+                    if (tx) {
+                      setSelectedTxId(tx.id);
+                    }
                     void loadAll(false);
                   }}
                 />

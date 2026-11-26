@@ -19,7 +19,7 @@ import type { BankCustomerAccount, SwitchTransaction } from "@/lib/types";
 interface TransferComposerProps {
   bankAccounts: BankCustomerAccount[];
   canInitiate: boolean;
-  onTransferSettled: (tx: SwitchTransaction) => void;
+  onTransferSettled: (tx: SwitchTransaction | null) => void;
 }
 
 const QUICK_AMOUNTS = [
@@ -78,6 +78,11 @@ export function TransferComposer({
 
   const selectedOriginator = originatorAccounts.find((a) => a.account_number === originatorAcct);
   const selectedBeneficiary = beneficiaryAccounts.find((a) => a.account_number === beneficiaryAcct);
+  const isSameBank = Boolean(
+    selectedOriginator &&
+      selectedBeneficiary &&
+      selectedOriginator.bank_code === selectedBeneficiary.bank_code
+  );
 
   const originatorOptions = originatorAccounts.map((a) => ({
     value: a.account_number,
@@ -113,7 +118,39 @@ export function TransferComposer({
         amount_centavos: centavos,
       });
 
+      if (res.routing_rail === "CBS_ON_US" && res.on_us_transfer) {
+        const onUs = res.on_us_transfer;
+        if (res.idempotent_replay) {
+          setFeedback({
+            status: "info",
+            title: `Idempotent On-Us Replay · ${onUs.bank_code} CBS (${onUs.cbs_ref ?? "DIRECT"})`,
+            description: `Direct CBS lock prevented double-debit. Returned original ${onUs.approved ? "POSTED" : "DECLINED"} outcome without METIX/SPIM.`,
+          });
+        } else if (onUs.approved) {
+          setFeedback({
+            status: "success",
+            title: `Direct CBS Settled · ${onUs.bank_code} On-Us · Auth ${onUs.auth_id ?? "OK"} (${onUs.processing_latency_ms}ms)`,
+            description: `${formatMzn(onUs.amount_centavos)} booked internally inside ${onUs.bank_code} (${onUs.cbs_ref}). Bypassed METIX/SPIM, ISO 8583, Suspense & MNS.`,
+          });
+          setIdempotencyKey(generateIdempotencyKey());
+        } else {
+          setFeedback({
+            status: "error",
+            title: `CBS On-Us Declined · Code ${onUs.response_code}`,
+            description:
+              onUs.reason ||
+              `Internal book transfer declined by ${onUs.bank_code} CBS (no METIX/SPIM involved).`,
+          });
+          setIdempotencyKey(generateIdempotencyKey());
+        }
+        onTransferSettled(null);
+        return;
+      }
+
       const tx = res.transaction;
+      if (!tx) {
+        throw new Error("Switch returned an empty transaction payload");
+      }
       if (res.idempotent_replay) {
         setFeedback({
           status: "info",
@@ -186,8 +223,25 @@ export function TransferComposer({
       const settled = await Promise.all(requests);
       const freshCount = settled.filter((r) => !r.idempotent_replay).length;
       const replayCount = settled.filter((r) => r.idempotent_replay).length;
-      const uniqueTxIds = new Set(settled.map((r) => r.transaction.id));
+
+      if (settled[0].routing_rail === "CBS_ON_US" && settled[0].on_us_transfer) {
+        const uniqueRefs = new Set(settled.map((r) => r.on_us_transfer?.cbs_ref ?? "DECLINED"));
+        const firstOnUs = settled[0].on_us_transfer;
+        setFeedback({
+          status: uniqueRefs.size === 1 ? "success" : "error",
+          title: `On-Us Retry Storm Absorbed: 5 concurrent requests -> ${uniqueRefs.size} Direct CBS execution`,
+          description: `${freshCount} fresh execution, ${replayCount} CBS idempotent replays (${firstOnUs.cbs_ref ?? firstOnUs.response_code}, bypassed METIX/SPIM).`,
+        });
+        setIdempotencyKey(generateIdempotencyKey());
+        onTransferSettled(null);
+        return;
+      }
+
+      const uniqueTxIds = new Set(settled.map((r) => r.transaction?.id).filter(Boolean));
       const firstTx = settled[0].transaction;
+      if (!firstTx) {
+        throw new Error("Switch returned an empty transaction payload during storm");
+      }
 
       setFeedback({
         status: uniqueTxIds.size === 1 ? "success" : "error",
@@ -214,14 +268,16 @@ export function TransferComposer({
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="min-w-0">
           <Heading level={4} weight="semibold">
-            Initiate Interbank ISO 8583 Transfer
+            {isSameBank ? "Initiate Direct On-Us Bank Transfer" : "Initiate Interbank ISO 8583 Transfer"}
           </Heading>
           <Text type="supporting" display="block">
-            Bidirectional BCI ↔ Standard Bank CBS + Optional Wallets · Ed25519 Signed
+            {isSameBank
+              ? `Same-bank book transfer inside ${selectedOriginator?.bank_code} CBS · Bypasses METIX/SPIM`
+              : "Bidirectional BCI ↔ Standard Bank CBS + Optional Wallets · Ed25519 Signed"}
           </Text>
         </div>
         <div className="shrink-0">
-          <Badge variant="info" label="MTI 0200" />
+          <Badge variant={isSameBank ? "success" : "info"} label={isSameBank ? "ON-US CBS" : "MTI 0200"} />
         </div>
       </div>
 
@@ -283,11 +339,21 @@ export function TransferComposer({
             <div className="flex items-center gap-2 text-xs font-medium px-2.5 py-0.5 rounded-full bg-muted border border-border">
               <span>{selectedOriginator?.bank_code ?? "ORIGINATOR"}</span>
               <ArrowRight className="w-3.5 h-3.5 text-accent" />
-              <span>METIX_SWITCH</span>
+              <span className={isSameBank ? "text-success font-semibold" : undefined}>
+                {isSameBank ? "DIRECT CBS (ON-US)" : "METIX_SWITCH"}
+              </span>
               <ArrowRight className="w-3.5 h-3.5 text-accent" />
               <span>{selectedBeneficiary?.bank_code ?? "BENEFICIARY"}</span>
             </div>
           </div>
+
+          {isSameBank && (
+            <Banner
+              status="info"
+              title="On-Us Intrabank Transfer — METIX / SPIM Not Required"
+              description={`Both accounts belong to ${selectedOriginator?.bank_code}. This transfer executes atomically inside ${selectedOriginator?.bank_code}'s Core Banking System with no ISO 8583 messages, no METIX Suspense clearing, no 25s SPIM SLA, and no MNS settlement impact.`}
+            />
+          )}
 
           <Selector
             label="Beneficiary CBS / Wallet Account (DE 103)"
@@ -301,14 +367,16 @@ export function TransferComposer({
 
         <div className="space-y-2">
           <TextInput
-            label="Amount in MZN (DE 4 — integer centavos)"
+            label={isSameBank ? "Amount in MZN (integer centavos)" : "Amount in MZN (DE 4 — integer centavos)"}
             value={amountInput}
             onChange={setAmountInput}
             placeholder="5000.00"
             width="100%"
             description={
               parsedPreview
-                ? `Wire DE 4 minor units: ${String(parsedPreview).padStart(12, "0")} (${parsedPreview.toLocaleString()} centavos)`
+                ? isSameBank
+                  ? `Direct CBS minor units: ${parsedPreview.toLocaleString()} centavos (no ISO 8583 DE 4)`
+                  : `Wire DE 4 minor units: ${String(parsedPreview).padStart(12, "0")} (${parsedPreview.toLocaleString()} centavos)`
                 : "Enter a valid positive MZN amount"
             }
           />
@@ -359,7 +427,7 @@ export function TransferComposer({
 
         <div className="flex flex-col sm:flex-row gap-2.5">
           <Button
-            label="Send 0200 Transfer"
+            label={isSameBank ? "Send Direct CBS Transfer" : "Send 0200 Transfer"}
             variant="primary"
             size="lg"
             width="100%"
