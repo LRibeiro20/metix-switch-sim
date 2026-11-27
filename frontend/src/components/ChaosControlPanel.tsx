@@ -7,6 +7,7 @@ import {
   Clock,
   PowerOff,
   Radio,
+  RotateCcw,
   ShieldAlert,
   WifiOff,
 } from "lucide-react";
@@ -45,8 +46,17 @@ const PRESETS = [
     id: "drop_0210",
     label: "Drop 0210 ACK (>25s)",
     tag: "0420 Reversal",
-    description: "Drops 0210 ACK; SLA sweeper sends 0420 & releases originator CBS hold.",
+    description: "Drops 0210 ACK before CBS credit; SLA sweeper sends 0420 & releases hold.",
     icon: WifiOff,
+    tone: "error" as const,
+  },
+  {
+    id: "commit_then_drop_0210",
+    label: "Commit Credit + Drop 0210",
+    tag: "Lost ACK -> 0420",
+    description:
+      "Beneficiary CBS commits credit & builds 0210, then drops ACK; 0420 compensates credit once.",
+    icon: RotateCcw,
     tone: "error" as const,
   },
   {

@@ -69,11 +69,48 @@ def _gen_auth() -> str:
     return "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
 
 
+_WALLET_CREDIT_LUA = """
+local st = redis.call('HGET', KEYS[1], 'status')
+if st then
+    return {1, redis.call('HGET', KEYS[1], 'auth_id') or ARGV[3]}
+end
+redis.call('HINCRBY', KEYS[2], 'balance', tonumber(ARGV[2]))
+redis.call('HINCRBY', KEYS[2], 'version', 1)
+redis.call(
+    'HSET', KEYS[1],
+    'status', 'POSTED',
+    'acct_no', ARGV[1],
+    'amount', ARGV[2],
+    'auth_id', ARGV[3]
+)
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
+return {1, ARGV[3]}
+"""
+
+_WALLET_REVERSE_LUA = """
+local st = redis.call('HGET', KEYS[1], 'status')
+if not st or st ~= 'POSTED' then
+    return {1, '00'}
+end
+local amt = tonumber(redis.call('HGET', KEYS[1], 'amount') or '0')
+local bal = tonumber(redis.call('HGET', KEYS[2], 'balance') or '0')
+if bal < amt then
+    return {0, '51'}
+end
+redis.call('HINCRBY', KEYS[2], 'balance', -amt)
+redis.call('HINCRBY', KEYS[2], 'version', 1)
+redis.call('HSET', KEYS[1], 'status', 'REVERSED')
+return {1, '00'}
+"""
+
+
 class WalletStore:
     """Redis-backed isolated wallet balance & chaos store (zero coupling to metix_switch DB)."""
 
     def __init__(self, redis_client: redis.Redis) -> None:
         self.redis = redis_client
+        self._credit_iso_lua = redis_client.register_script(_WALLET_CREDIT_LUA)
+        self._reverse_iso_lua = redis_client.register_script(_WALLET_REVERSE_LUA)
 
     async def seed(self) -> None:
         for acct_no, meta in SEED_WALLETS.items():
@@ -146,6 +183,31 @@ class WalletStore:
         await self.redis.hincrby(key, "balance", amount)
         await self.redis.hincrby(key, "version", 1)
         return True
+
+    async def credit_iso(
+        self, acct_no: str, amount: int, stan: str, rrn: str, auth_id: str
+    ) -> tuple[bool, str | None]:
+        await self.seed()
+        if acct_no not in SEED_WALLETS:
+            return False, None
+        tx_key = f"wallet:tx:{stan}:{rrn}"
+        acct_key = f"wallet:acct:{acct_no}"
+        res = await self._credit_iso_lua(
+            keys=[tx_key, acct_key],
+            args=[acct_no, amount, auth_id, 86_400],
+        )
+        returned_auth = res[1].decode() if isinstance(res[1], bytes) else str(res[1])
+        return int(res[0]) == 1, returned_auth
+
+    async def reverse_iso(self, acct_no: str, stan: str, rrn: str) -> str:
+        await self.seed()
+        if acct_no not in SEED_WALLETS:
+            return "00"
+        tx_key = f"wallet:tx:{stan}:{rrn}"
+        acct_key = f"wallet:acct:{acct_no}"
+        res = await self._reverse_iso_lua(keys=[tx_key, acct_key])
+        code = res[1].decode() if isinstance(res[1], bytes) else str(res[1])
+        return code
 
     async def debit(self, acct_no: str, amount: int) -> bool:
         await self.seed()
@@ -262,14 +324,26 @@ async def receive_wallet_iso8583(
                 status_code=200,
                 content={"dropped": False, "iso_message": resp.model_dump(mode="json")},
             )
-        ok = await store.credit(ben_acct, msg.de4)
+        ok, auth_id = await store.credit_iso(ben_acct, msg.de4, msg.de11, msg.de37, _gen_auth())
         if not ok:
             resp = build_0210(msg, response_code="14")
             return JSONResponse(
                 status_code=200,
                 content={"dropped": False, "iso_message": resp.model_dump(mode="json")},
             )
-        resp = build_0210(msg, response_code="00", auth_id=_gen_auth())
+        resp = build_0210(msg, response_code="00", auth_id=auth_id)
+        if chaos.commit_then_drop_0210:
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "dropped": True,
+                    "beneficiary": ben_bank,
+                    "reason": (
+                        "Chaos commit_then_drop_0210 active — wallet credit committed, "
+                        "0210 ACK dropped on wire"
+                    ),
+                },
+            )
         return JSONResponse(
             status_code=200,
             content={"dropped": False, "iso_message": resp.model_dump(mode="json")},
@@ -281,7 +355,8 @@ async def receive_wallet_iso8583(
                 status_code=202,
                 content={"dropped": True, "beneficiary": ben_bank, "reason": "Chaos fail_0430"},
             )
-        resp = build_0430(msg, response_code="00")
+        de39 = await store.reverse_iso(ben_acct, msg.de11, msg.de37)
+        resp = build_0430(msg, response_code=de39)
         return JSONResponse(
             status_code=200,
             content={"dropped": False, "iso_message": resp.model_dump(mode="json")},

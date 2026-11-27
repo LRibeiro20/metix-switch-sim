@@ -171,6 +171,7 @@ class BankChaosUpdateRequest(BaseModel):
     preset: str | None = None
     latency_ms: int | None = Field(default=None, ge=0, le=60_000)
     drop_0210: bool | None = None
+    commit_then_drop_0210: bool | None = None
     force_de39: str | None = Field(default=None, pattern=r"^[A-Z0-9]{2}$")
     fail_0430: bool | None = None
     offline: bool | None = None

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
 from app.db.models import (
     Account,
@@ -19,7 +20,8 @@ from app.db.models import (
 from app.db.seed import METIX_SUSPENSE_ACCOUNT_NUMBER
 from app.iso8583.codec import build_0200, build_0420, decode_raw_iso, encode_raw_iso
 from app.services.ledger import post_balanced_journal
-from cbs.db.models import CbsAccount, CbsHold
+from cbs.db.models import CbsAccount, CbsHold, CbsJournalEntry, CbsTransaction
+from shared.iso8583.models import Iso8583Message
 from tests.conftest import MultiBankTestEnv
 
 BCI_INDIVIDUAL = "00010012345678"  # Amélia Machel (500,000.00 MT in bci_cbs)
@@ -513,3 +515,478 @@ async def test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance(
         ).scalar_one()
         assert bci_after.balance_centavos == bci_before
         assert stdb_after.balance_centavos == stdb_before
+
+
+@pytest.mark.asyncio
+async def test_7_commit_then_drop_0210_lost_ack_compensates_across_all_three_dbs(
+    clean_env: MultiBankTestEnv,
+) -> None:
+    """Scenario 7: Lost ACK (commit_then_drop_0210) commits beneficiary credit before drop;
+    >25s SLA 0420/0430 compensates all 3 DBs idempotently even under repeated 0420 retries.
+    """
+    env = clean_env
+
+    # 1. Configure commit_then_drop_0210 chaos on Standard Bank CBS
+    r_ch = await env.client.post(
+        "/api/v1/banks/STDB_MZ/chaos",
+        json={"preset": "commit_then_drop_0210", "latency_ms": 10},
+        headers=env.admin_headers,
+    )
+    assert r_ch.status_code == 200
+    chaos_cfg = r_ch.json()
+    assert chaos_cfg["preset"] == "commit_then_drop_0210"
+    assert chaos_cfg["commit_then_drop_0210"] is True
+    assert chaos_cfg["drop_0210"] is False
+    assert chaos_cfg["fail_0430"] is False
+
+    # 2. Customer transfers 10,000.00 MT (1,000,000 centavos) from BCI -> Standard Bank
+    amount = 1_000_000
+    resp = await env.client.post(
+        "/api/v1/transfers",
+        json={
+            "idempotency_key": f"lost-ack-{uuid.uuid4().hex}",
+            "originator_account_number": BCI_INDIVIDUAL,
+            "beneficiary_account_number": STDB_INDIVIDUAL,
+            "amount_centavos": amount,
+        },
+        headers=env.maker_headers,
+    )
+    assert resp.status_code == 200
+    tx = resp.json()["transaction"]
+    tx_id = uuid.UUID(tx["id"])
+    stan = tx["stan"]
+    rrn = tx["rrn"]
+
+    # 3. Mid-flight verification across ALL THREE databases while 0210 ACK is lost
+    assert tx["status"] == TransactionStatus.ROUTED.value
+    assert tx["response_code"] is None
+    mid_mtis = [(m["mti"], m["direction"]) for m in tx["iso_messages"]]
+    assert ("0200", "INBOUND") in mid_mtis
+    assert ("0200", "OUTBOUND") in mid_mtis
+    assert all(m["mti"] != "0210" for m in tx["iso_messages"])
+    assert [e["entry_type"] for e in tx["journal_entries"]] == [
+        JournalEntryType.CLEARING_HOLD.value
+    ]
+
+    # 3A. Originator DB (bci_cbs): 10,000 MT earmarked (available < ledger), hold ACTIVE
+    async with env.bci_session_factory() as s:
+        bci = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == BCI_INDIVIDUAL))
+        ).scalar_one()
+        hold = (
+            await s.execute(select(CbsHold).where(CbsHold.hold_ref == tx["originator_hold_ref"]))
+        ).scalar_one()
+        bci_tx = (
+            await s.execute(
+                select(CbsTransaction).where(
+                    CbsTransaction.idempotency_key == tx["idempotency_key"]
+                )
+            )
+        ).scalar_one()
+        assert bci.available_balance_centavos == 50_000_000 - amount
+        assert bci.ledger_balance_centavos == 50_000_000
+        assert hold.status == "ACTIVE"
+        assert bci_tx.status == "HELD"
+
+    # 3B. Switch DB (metix_switch): Leg 1 CLEARING_HOLD parked in METIX-SUSPENSE-943
+    async with env.switch_session_factory() as s:
+        sw_accts = {
+            a.account_number: a
+            for a in (
+                await s.execute(
+                    select(Account).where(
+                        Account.account_number.in_(
+                            ["SETTLE-BCI-943", "SETTLE-STDB-943", METIX_SUSPENSE_ACCOUNT_NUMBER]
+                        )
+                    )
+                )
+            ).scalars()
+        }
+        assert sw_accts["SETTLE-BCI-943"].balance_centavos == 500_000_000 - amount
+        assert sw_accts["SETTLE-STDB-943"].balance_centavos == 500_000_000
+        assert sw_accts[METIX_SUSPENSE_ACCOUNT_NUMBER].balance_centavos == amount
+
+    # 3C. Beneficiary DB (stdb_cbs): credit ALREADY COMMITTED before 0210 was dropped!
+    credit_idemp = f"credit:{stan}:{rrn}"
+    async with env.stdb_session_factory() as s:
+        stdb = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == STDB_INDIVIDUAL))
+        ).scalar_one()
+        stdb_gl = (
+            await s.execute(
+                select(CbsAccount).where(CbsAccount.account_number == "STDB-CLEARING-GL-943")
+            )
+        ).scalar_one()
+        stdb_tx = (
+            await s.execute(
+                select(CbsTransaction).where(CbsTransaction.idempotency_key == credit_idemp)
+            )
+        ).scalar_one()
+        stdb_jes = list(
+            (
+                await s.execute(
+                    select(CbsJournalEntry)
+                    .where(CbsJournalEntry.cbs_transaction_id == stdb_tx.id)
+                    .options(selectinload(CbsJournalEntry.postings))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert stdb.available_balance_centavos == 40_000_000 + amount
+        assert stdb.ledger_balance_centavos == 40_000_000 + amount
+        assert stdb_gl.available_balance_centavos == -amount
+        assert stdb_gl.ledger_balance_centavos == -amount
+        assert stdb_tx.status == "POSTED"
+        assert stdb_tx.response_code == "00"
+        assert stdb_tx.auth_id is not None and len(stdb_tx.auth_id) == 6
+        assert [je.entry_type for je in stdb_jes] == ["INBOUND_CREDIT"]
+        credit_postings = {
+            (p.account_id, p.direction): p.amount_centavos for p in stdb_jes[0].postings
+        }
+        assert credit_postings == {
+            (stdb_gl.id, "DEBIT"): amount,
+            (stdb.id, "CREDIT"): amount,
+        }
+
+    # 4. Fast-forward 25s SPIM SLA deadline and run SLA sweeper (dispatches 0420 -> 0430)
+    async with env.switch_session_factory() as s:
+        await s.execute(
+            update(SwitchTransaction)
+            .where(SwitchTransaction.id == tx_id)
+            .values(sla_deadline_at=datetime.now(UTC) - timedelta(seconds=26))
+        )
+        await s.commit()
+
+    processed = await env.sweeper.sweep_once()
+    assert tx_id in processed
+
+    # 5. Post-recovery verification across ALL THREE databases
+    tx_after = (await env.client.get(f"/api/v1/transactions/{tx_id}")).json()
+    assert tx_after["status"] == TransactionStatus.REVERSED.value
+    assert tx_after["response_code"] == "68"
+
+    trace_pairs = [(m["mti"], m["direction"]) for m in tx_after["iso_messages"]]
+    assert trace_pairs == [
+        ("0200", "INBOUND"),
+        ("0200", "OUTBOUND"),
+        ("0420", "OUTBOUND"),
+        ("0430", "INBOUND"),
+    ]
+    msg_0420_log = next(m for m in tx_after["iso_messages"] if m["mti"] == "0420")
+    msg_0430_log = next(m for m in tx_after["iso_messages"] if m["mti"] == "0430")
+    assert msg_0420_log["response_code"] == "68"
+    assert msg_0420_log["payload_json"]["de90"].startswith(f"0200{stan}")
+    assert len(msg_0420_log["payload_json"]["de90"]) == 42
+    assert msg_0430_log["response_code"] == "00"
+
+    assert [e["entry_type"] for e in tx_after["journal_entries"]] == [
+        JournalEntryType.CLEARING_HOLD.value,
+        JournalEntryType.REVERSAL.value,
+    ]
+    for entry in tx_after["journal_entries"]:
+        dr = sum(
+            p["amount_centavos"]
+            for p in entry["postings"]
+            if p["direction"] == PostingDirection.DEBIT.value
+        )
+        cr = sum(
+            p["amount_centavos"]
+            for p in entry["postings"]
+            if p["direction"] == PostingDirection.CREDIT.value
+        )
+        assert dr == cr == amount
+
+    # 5A. Originator DB (bci_cbs): hold RELEASED, balances & daily quota restored
+    async with env.bci_session_factory() as s:
+        bci = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == BCI_INDIVIDUAL))
+        ).scalar_one()
+        hold = (
+            await s.execute(select(CbsHold).where(CbsHold.hold_ref == tx["originator_hold_ref"]))
+        ).scalar_one()
+        bci_tx = (
+            await s.execute(
+                select(CbsTransaction).where(
+                    CbsTransaction.idempotency_key == tx["idempotency_key"]
+                )
+            )
+        ).scalar_one()
+        assert bci.available_balance_centavos == 50_000_000
+        assert bci.ledger_balance_centavos == 50_000_000
+        assert hold.status == "RELEASED"
+        assert bci_tx.status == "REVERSED"
+
+    bank_accts = (await env.client.get("/api/v1/banks/accounts")).json()
+    bci_acct_api = next(a for a in bank_accts if a["account_number"] == BCI_INDIVIDUAL)
+    assert bci_acct_api["daily_used_centavos"] == 0
+    assert bci_acct_api["switch_daily_used_centavos"] == 0
+
+    # 5B. Switch DB (metix_switch): suspense == 0, settlement accounts restored, ledger balanced
+    async with env.switch_session_factory() as s:
+        sw_accts = {
+            a.account_number: a
+            for a in (
+                await s.execute(
+                    select(Account).where(
+                        Account.account_number.in_(
+                            ["SETTLE-BCI-943", "SETTLE-STDB-943", METIX_SUSPENSE_ACCOUNT_NUMBER]
+                        )
+                    )
+                )
+            ).scalars()
+        }
+        assert sw_accts["SETTLE-BCI-943"].balance_centavos == 500_000_000
+        assert sw_accts["SETTLE-STDB-943"].balance_centavos == 500_000_000
+        assert sw_accts[METIX_SUSPENSE_ACCOUNT_NUMBER].balance_centavos == 0
+
+    ledger = (await env.client.get("/api/v1/ledger")).json()
+    assert ledger["is_balanced"] is True
+    assert ledger["suspense_balance_centavos"] == 0
+
+    # 5C. Beneficiary DB (stdb_cbs): credit compensated, GL zeroed, balanced INBOUND_REVERSAL JE
+    async with env.stdb_session_factory() as s:
+        stdb = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == STDB_INDIVIDUAL))
+        ).scalar_one()
+        stdb_gl = (
+            await s.execute(
+                select(CbsAccount).where(CbsAccount.account_number == "STDB-CLEARING-GL-943")
+            )
+        ).scalar_one()
+        stdb_tx = (
+            await s.execute(
+                select(CbsTransaction).where(CbsTransaction.idempotency_key == credit_idemp)
+            )
+        ).scalar_one()
+        stdb_jes = list(
+            (
+                await s.execute(
+                    select(CbsJournalEntry)
+                    .where(CbsJournalEntry.cbs_transaction_id == stdb_tx.id)
+                    .options(selectinload(CbsJournalEntry.postings))
+                    .order_by(CbsJournalEntry.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert stdb.available_balance_centavos == 40_000_000
+        assert stdb.ledger_balance_centavos == 40_000_000
+        assert stdb_gl.available_balance_centavos == 0
+        assert stdb_gl.ledger_balance_centavos == 0
+        assert stdb_tx.status == "REVERSED"
+        assert [je.entry_type for je in stdb_jes] == ["INBOUND_CREDIT", "INBOUND_REVERSAL"]
+        rev_postings = {
+            (p.account_id, p.direction): p.amount_centavos for p in stdb_jes[1].postings
+        }
+        assert rev_postings == {
+            (stdb.id, "DEBIT"): amount,
+            (stdb_gl.id, "CREDIT"): amount,
+        }
+
+    # 6. Repeated 0420 messages (sequential + concurrent) MUST NOT reverse the same credit twice
+    iso_0420 = Iso8583Message.model_validate(msg_0420_log["payload_json"])
+    stdb_adapter = env.sweeper.adapters.get("STDB_MZ")
+
+    seq_replay = await stdb_adapter.send_iso_message(
+        iso_0420, timeout_seconds=5.0, switch_tx_id=tx_id
+    )
+    assert seq_replay.response_message is not None
+    assert seq_replay.response_message.mti.value == "0430"
+    assert seq_replay.response_message.de39 == "00"
+
+    conc_replays = await asyncio.gather(
+        *(
+            stdb_adapter.send_iso_message(iso_0420, timeout_seconds=5.0, switch_tx_id=tx_id)
+            for _ in range(3)
+        )
+    )
+    for res in conc_replays:
+        assert res.response_message is not None
+        assert res.response_message.mti.value == "0430"
+        assert res.response_message.de39 == "00"
+
+    # Re-verify stdb_cbs balances and journal entry count did NOT double-reverse
+    async with env.stdb_session_factory() as s:
+        stdb = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == STDB_INDIVIDUAL))
+        ).scalar_one()
+        stdb_gl = (
+            await s.execute(
+                select(CbsAccount).where(CbsAccount.account_number == "STDB-CLEARING-GL-943")
+            )
+        ).scalar_one()
+        stdb_tx = (
+            await s.execute(
+                select(CbsTransaction).where(CbsTransaction.idempotency_key == credit_idemp)
+            )
+        ).scalar_one()
+        stdb_jes = list(
+            (
+                await s.execute(
+                    select(CbsJournalEntry).where(CbsJournalEntry.cbs_transaction_id == stdb_tx.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert stdb.available_balance_centavos == 40_000_000
+        assert stdb.ledger_balance_centavos == 40_000_000
+        assert stdb_gl.available_balance_centavos == 0
+        assert stdb_gl.ledger_balance_centavos == 0
+        assert stdb_tx.status == "REVERSED"
+        assert [je.entry_type for je in stdb_jes].count("INBOUND_REVERSAL") == 1
+
+    # 7. 3-Way reconciliation confirms zero exceptions across all 3 databases
+    recon_resp = await env.client.post("/api/v1/reconciliation/run", headers=env.maker_headers)
+    assert recon_resp.status_code == 200
+    recon_data = recon_resp.json()
+    assert recon_data["run"]["new_exception_count"] == 0
+    assert recon_data["exceptions"] == []
+
+
+@pytest.mark.asyncio
+async def test_8_concurrent_0420_race_and_wallet_commit_then_drop(
+    clean_env: MultiBankTestEnv,
+) -> None:
+    """Scenario 8: Simultaneous 5x 0420 race against an un-reversed POSTED credit reverses
+    exactly once (SELECT ... FOR UPDATE), and wallet_sim honors commit_then_drop_0210 too.
+    """
+    env = clean_env
+
+    # Part A: Simultaneous 5x 0420 race directly on STDB_MZ while credit is still POSTED
+    r_ch = await env.client.post(
+        "/api/v1/banks/STDB_MZ/chaos",
+        json={"preset": "commit_then_drop_0210", "latency_ms": 5},
+        headers=env.admin_headers,
+    )
+    assert r_ch.status_code == 200
+
+    amount = 1_000_000  # 10,000.00 MT
+    resp = await env.client.post(
+        "/api/v1/transfers",
+        json={
+            "idempotency_key": f"race-0420-{uuid.uuid4().hex}",
+            "originator_account_number": BCI_INDIVIDUAL,
+            "beneficiary_account_number": STDB_INDIVIDUAL,
+            "amount_centavos": amount,
+        },
+        headers=env.maker_headers,
+    )
+    assert resp.status_code == 200
+    tx = resp.json()["transaction"]
+    tx_id = uuid.UUID(tx["id"])
+    assert tx["status"] == TransactionStatus.ROUTED.value
+
+    iso_0420 = build_0420(
+        originator_account=BCI_INDIVIDUAL,
+        originator_code="BCI_MZ",
+        beneficiary_account=STDB_INDIVIDUAL,
+        beneficiary_code="STDB_MZ",
+        amount_centavos=amount,
+        orig_stan=tx["stan"],
+        orig_rrn=tx["rrn"],
+        orig_de7=tx["transmission_datetime"],
+        response_code="68",
+    )
+
+    stdb_adapter = env.sweeper.adapters.get("STDB_MZ")
+    barrier = asyncio.Barrier(5)
+
+    async def _send_0420() -> str:
+        await barrier.wait()
+        res = await stdb_adapter.send_iso_message(iso_0420, timeout_seconds=5.0, switch_tx_id=tx_id)
+        assert res.response_message is not None
+        assert res.response_message.mti.value == "0430"
+        return res.response_message.de39 or ""
+
+    codes = await asyncio.gather(*(_send_0420() for _ in range(5)))
+    assert codes == ["00", "00", "00", "00", "00"]
+
+    credit_idemp = f"credit:{tx['stan']}:{tx['rrn']}"
+    async with env.stdb_session_factory() as s:
+        stdb = (
+            await s.execute(select(CbsAccount).where(CbsAccount.account_number == STDB_INDIVIDUAL))
+        ).scalar_one()
+        stdb_gl = (
+            await s.execute(
+                select(CbsAccount).where(CbsAccount.account_number == "STDB-CLEARING-GL-943")
+            )
+        ).scalar_one()
+        stdb_tx = (
+            await s.execute(
+                select(CbsTransaction).where(CbsTransaction.idempotency_key == credit_idemp)
+            )
+        ).scalar_one()
+        stdb_jes = list(
+            (
+                await s.execute(
+                    select(CbsJournalEntry).where(CbsJournalEntry.cbs_transaction_id == stdb_tx.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert stdb.available_balance_centavos == 40_000_000
+        assert stdb.ledger_balance_centavos == 40_000_000
+        assert stdb_gl.available_balance_centavos == 0
+        assert stdb_gl.ledger_balance_centavos == 0
+        assert stdb_tx.status == "REVERSED"
+        assert [je.entry_type for je in stdb_jes].count("INBOUND_REVERSAL") == 1
+
+    # Part B: Wallet simulator (MPESA_MZ) also commits before drop and reverses idempotently once
+    r_wch = await env.client.post(
+        "/api/v1/banks/MPESA_MZ/chaos",
+        json={"preset": "commit_then_drop_0210", "latency_ms": 5},
+        headers=env.admin_headers,
+    )
+    assert r_wch.status_code == 200
+
+    w_amt = 250_000  # 2,500.00 MT
+    w_resp = await env.client.post(
+        "/api/v1/transfers",
+        json={
+            "idempotency_key": f"wallet-lost-ack-{uuid.uuid4().hex}",
+            "originator_account_number": BCI_INDIVIDUAL,
+            "beneficiary_account_number": MPESA_WALLET,
+            "amount_centavos": w_amt,
+        },
+        headers=env.maker_headers,
+    )
+    assert w_resp.status_code == 200
+    w_tx = w_resp.json()["transaction"]
+    w_tx_id = uuid.UUID(w_tx["id"])
+    assert w_tx["status"] == TransactionStatus.ROUTED.value
+
+    # Confirm wallet credited before 0210 was dropped
+    mpesa_mid = await env.sweeper.adapters.get("MPESA_MZ").get_balance(MPESA_WALLET)
+    assert mpesa_mid is not None
+    assert mpesa_mid.available_balance_centavos == 5_000_000 + w_amt
+
+    # Expire SLA & sweep -> reverses wallet credit once and releases BCI hold
+    async with env.switch_session_factory() as s:
+        await s.execute(
+            update(SwitchTransaction)
+            .where(SwitchTransaction.id == w_tx_id)
+            .values(sla_deadline_at=datetime.now(UTC) - timedelta(seconds=26))
+        )
+        await s.commit()
+    await env.sweeper.sweep_once()
+
+    mpesa_after = await env.sweeper.adapters.get("MPESA_MZ").get_balance(MPESA_WALLET)
+    assert mpesa_after is not None
+    assert mpesa_after.available_balance_centavos == 5_000_000
+
+    # Replay 0420 against wallet -> must NOT reverse twice
+    w_after = (await env.client.get(f"/api/v1/transactions/{w_tx_id}")).json()
+    w_0420_log = next(m for m in w_after["iso_messages"] if m["mti"] == "0420")
+    w_0420 = Iso8583Message.model_validate(w_0420_log["payload_json"])
+    w_replay = await env.sweeper.adapters.get("MPESA_MZ").send_iso_message(
+        w_0420, timeout_seconds=5.0, switch_tx_id=w_tx_id
+    )
+    assert w_replay.response_message is not None
+    assert w_replay.response_message.de39 == "00"
+    mpesa_final = await env.sweeper.adapters.get("MPESA_MZ").get_balance(MPESA_WALLET)
+    assert mpesa_final is not None
+    assert mpesa_final.available_balance_centavos == 5_000_000

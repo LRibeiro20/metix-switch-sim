@@ -140,6 +140,7 @@ class BankChaosConfig(BaseModel):
     preset: str = Field(default="normal")
     latency_ms: int = Field(default=60, ge=0, le=60_000)
     drop_0210: bool = Field(default=False)
+    commit_then_drop_0210: bool = Field(default=False)
     force_de39: str | None = Field(default=None, pattern=r"^[A-Z0-9]{2}$")
     fail_0430: bool = Field(default=False)
     offline: bool = Field(default=False)

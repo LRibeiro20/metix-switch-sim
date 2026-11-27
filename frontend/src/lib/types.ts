@@ -172,6 +172,7 @@ export interface BankChaosConfig {
   preset: string;
   latency_ms: number;
   drop_0210: boolean;
+  commit_then_drop_0210: boolean;
   force_de39: string | null;
   fail_0430: boolean;
   offline: boolean;

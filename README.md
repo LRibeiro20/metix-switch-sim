@@ -19,7 +19,7 @@ In February 2026, **Banco de Moçambique** enacted **Notice No. 1/GBM/2026** (ef
 | Real-World Interbank Payment Problem | How `metix-switch-sim` Solves It |
 | :--- | :--- |
 | **1. Bank Core Isolation (No Shared Customer DB)** | **BCI Core Banking (`bci-cbs` + `bci_cbs`)** and **Standard Bank Core Banking (`stdb-cbs` + `stdb_cbs`)** run as independent services with separate PostgreSQL 16 databases, Available vs. Ledger balances, earmark holds, internal double-entry GLs, and AES-256-GCM encrypted PII. **METIX Switch (`metix_switch`)** owns only clearing suspense and participant settlement accounts and talks to banks exclusively through **Bank Integration Adapters**. |
-| **2. Timeout Ambiguity (25s SPIM SLA)** | Originator CBS earmarks `available_balance` while Switch posts Leg 1 `CLEARING_HOLD` (`SETTLE-* → METIX-SUSPENSE-943`). If `0210` is dropped past `25s`, the `sla-sweeper` worker dispatches `MTI 0420` (`DE 90`), posts a balanced reversal, releases Redis daily quota, and releases the Originator CBS hold. |
+| **2. Timeout Ambiguity & Lost ACKs (25s SPIM SLA)** | Originator CBS earmarks `available_balance` while Switch posts Leg 1 `CLEARING_HOLD` (`SETTLE-* → METIX-SUSPENSE-943`). If `0210` is dropped pre-credit (`drop_0210`) **or after the beneficiary CBS commits the credit (`commit_then_drop_0210`)**, the `sla-sweeper` worker dispatches `MTI 0420` (`DE 90`) after `25s`, beneficiary CBS atomically posts a balanced `INBOUND_REVERSAL` once (idempotent under repeated/concurrent `0420`s), Switch reverses suspense, and BCI releases the earmark hold. See [`docs/lost-acknowledgment-recovery.md`](docs/lost-acknowledgment-recovery.md). |
 | **3. Mobile Retry Storms (Double-Debit Risk)** | Atomic **Redis `SET ... NX EX`** idempotency locks (`idempotency_key` + `STAN + RRN`) guarantee `5×` concurrent retry storms execute **once** across both Switch and CBS ledgers. |
 | **4. Multilateral Settlement & Liquidity Risk** | Live **Multilateral Net Settlement (MNS)** calculates zero-sum net debit/credit positions ($\sum \text{net} = 0$), verifies intraday liquidity/reserve floors, supports liquidity-shortfall failure simulation + BM RTGS top-ups, and generates **Ed25519-signed settlement reports**. |
 | **5. Inter-System Discrepancies & Suspense Float** | Automated **3-Way Financial Reconciliation** compares `metix_switch`, `bci_cbs`, and `stdb_cbs` to detect missing postings, orphans, duplicates, stale holds, and aged suspense—resolved strictly via **4-Eyes Maker-Checker** adjustments (`checker_id != maker_id`). |
@@ -138,6 +138,8 @@ stateDiagram-v2
     REVERSAL_SENT --> RECON_HOLD: 0430 dropped/failed (Suspense ring-fenced -> Maker-Checker Recon)
 ```
 
+> **Deep Dive — The Lost Acknowledgment Problem (`commit_then_drop_0210`):** See [`docs/lost-acknowledgment-recovery.md`](docs/lost-acknowledgment-recovery.md) for the full sequence diagram, observed ISO 8583 wire trace (`0200` → committed/dropped `0210` → `0420`/`0430` → duplicate `0420` idempotency), before-and-after 3-DB balances, and double-entry database journal rows for a `10,000.00 MT` BCI → Standard Bank transfer.
+
 ---
 
 ## 4. Enterprise Capabilities Overview
@@ -210,24 +212,53 @@ stateDiagram-v2
 
 ---
 
-## 6. Automated Test Suite (`12 / 12` Passing)
+## 6. Automated Test Suite (`15 / 15` Passing)
 
 Executed against all **3 isolated PostgreSQL 16 containers** and **Redis 7** with real OAuth 2.0 JWTs, Ed25519 digital signatures, and X.509 PKI validation:
 
-- **[`backend/tests/test_switch_integration.py`](backend/tests/test_switch_integration.py)** *(8 tests)*:
+- **[`backend/tests/test_switch_integration.py`](backend/tests/test_switch_integration.py)** *(10 tests)*:
   1. `test_iso8583_wire_codec_round_trip` — `0200` / `0420` 128-bit bitmap ASCII round-trip.
   2. `test_terminal_states_never_transition_backward` — strict monotonic state machine enforcement.
   3. `test_1_happy_path_bidirectional_cbs_and_wallet_settlement` — `BCI ↔ STDB` and `BCI → M-Pesa` across isolated DBs, verifying CBS hold capture & balanced Switch settlement journals.
   4. `test_2_duplicate_retry_idempotency_single_execution` — `5×` concurrent + sequential retry storm with single CBS debit and single Switch execution.
-  5. `test_3_beneficiary_timeout_over_25s_sla_releases_cbs_hold_and_reverses` — dropped `0210` leaves `available < ledger` in `bci_cbs`; `>25s` SLA `0420/0430` reverses Switch suspense and releases the BCI hold.
+  5. `test_3_beneficiary_timeout_over_25s_sla_releases_cbs_hold_and_reverses` — dropped `0210` (`drop_0210`) leaves `available < ledger` in `bci_cbs`; `>25s` SLA `0420/0430` reverses Switch suspense and releases the BCI hold.
   6. `test_4_individual_daily_limit_and_cbs_account_restrictions` — `200,000 MT` Notice No. 1/GBM/2026 cap (`DE 39 = 61`) + CBS `PND` account restriction (`DE 39 = 62`).
   7. `test_5_beneficiary_inoperative_de39_91_reverses_and_releases_hold` — `DE 39 = 91` decline reverses Switch clearing hold & releases BCI hold.
   8. `test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance` — `5×` concurrent distinct transfers exceeding BCI available balance (zero overdraft, `DE 39 = 51`) + opposite-direction deadlock safety.
-- **[`backend/tests/test_enterprise_features.py`](backend/tests/test_enterprise_features.py)** *(4 tests)*:
-  9. `test_settlement_mns_zero_sum_failure_simulation_and_signed_report` — MNS zero-sum netting, liquidity shortfall simulation (`FAILED`), BM RTGS top-up, successful retry, and Ed25519 report signature verification.
-  10. `test_three_way_reconciliation_and_maker_checker_four_eyes` — detects `RECON_HOLD`, `MISSING_IN_SWITCH`, `SUSPENSE_AGING`; blocks Maker & Admin self-approval (`403`); Checker approves & clears suspense.
-  11. `test_fraud_round_trip_review_queue_and_velocity_burst` — rapid `A → B → A` round-trip queued in `PENDING_REVIEW` and released by `fraud.analyst`, plus 8-tx/60s velocity burst detection.
-  12. `test_enterprise_security_mtls_oauth_rbac_signatures_encryption_and_audit_chain` — X.509 CA chain verification, OAuth 2.0 `401`/`403` RBAC, Ed25519 tamper & replay nonce rejection against `bci-cbs`, AES-256-GCM ciphertext check in `bci_cbs`, and SHA-256 `audit_logs` chain verification + DB tamper detection.
+  9. `test_7_commit_then_drop_0210_lost_ack_compensates_across_all_three_dbs` — **Lost Acknowledgment (`commit_then_drop_0210`)**: `10,000.00 MT` BCI → Standard Bank commits `INBOUND_CREDIT` in `stdb_cbs` before dropping `0210`; `>25s` SLA `0420`/`0430` compensates `stdb_cbs` via balanced `INBOUND_REVERSAL` journal, reverses `METIX-SUSPENSE-943`, releases `bci_cbs` hold & Redis quota, rejects double-reversal on repeated sequential/concurrent `0420` retries, and passes 3-way reconciliation with `0` exceptions.
+  10. `test_8_concurrent_0420_race_and_wallet_commit_then_drop` — simultaneous `5×` `0420` race against an un-reversed `POSTED` credit (`SELECT ... FOR UPDATE` enforces exactly 1 `INBOUND_REVERSAL`) plus `commit_then_drop_0210` idempotent reversal parity on `MPESA_MZ` wallet simulator.
+- **[`backend/tests/test_enterprise_features.py`](backend/tests/test_enterprise_features.py)** *(5 tests)*:
+  11. `test_settlement_mns_zero_sum_failure_simulation_and_signed_report` — MNS zero-sum netting, liquidity shortfall simulation (`FAILED`), BM RTGS top-up, successful retry, and Ed25519 report signature verification.
+  12. `test_three_way_reconciliation_and_maker_checker_four_eyes` — detects `RECON_HOLD`, `MISSING_IN_SWITCH`, `SUSPENSE_AGING`; blocks Maker & Admin self-approval (`403`); Checker approves & clears suspense.
+  13. `test_fraud_round_trip_review_queue_and_velocity_burst` — rapid `A → B → A` round-trip queued in `PENDING_REVIEW` and released by `fraud.analyst`, plus 8-tx/60s velocity burst detection.
+  14. `test_enterprise_security_mtls_oauth_rbac_signatures_encryption_and_audit_chain` — X.509 CA chain verification, OAuth 2.0 `401`/`403` RBAC, Ed25519 tamper & replay nonce rejection against `bci-cbs`, AES-256-GCM ciphertext check in `bci_cbs`, and SHA-256 `audit_logs` chain verification + DB tamper detection.
+  15. `test_same_bank_on_us_transfer_bypasses_metix_spim` — same-bank (`BCI → BCI` / `STDB → STDB`) on-us book transfers settle directly inside CBS without METIX/SPIM, ISO 8583, or MNS settlement, even under active ISO chaos.
+
+### Latest Verified Test Run (`uv --directory backend run pytest -v`)
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.14.2, pytest-9.2.0, pluggy-1.7.0
+collected 15 items
+
+tests/test_enterprise_features.py::test_settlement_mns_zero_sum_failure_simulation_and_signed_report PASSED [  6%]
+tests/test_enterprise_features.py::test_three_way_reconciliation_and_maker_checker_four_eyes PASSED [ 13%]
+tests/test_enterprise_features.py::test_fraud_round_trip_review_queue_and_velocity_burst PASSED [ 20%]
+tests/test_enterprise_features.py::test_enterprise_security_mtls_oauth_rbac_signatures_encryption_and_audit_chain PASSED [ 26%]
+tests/test_enterprise_features.py::test_same_bank_on_us_transfer_bypasses_metix_spim PASSED [ 33%]
+tests/test_switch_integration.py::test_iso8583_wire_codec_round_trip PASSED [ 40%]
+tests/test_switch_integration.py::test_terminal_states_never_transition_backward PASSED [ 46%]
+tests/test_switch_integration.py::test_1_happy_path_bidirectional_cbs_and_wallet_settlement PASSED [ 53%]
+tests/test_switch_integration.py::test_2_duplicate_retry_idempotency_single_execution PASSED [ 60%]
+tests/test_switch_integration.py::test_3_beneficiary_timeout_over_25s_sla_releases_cbs_hold_and_reverses PASSED [ 66%]
+tests/test_switch_integration.py::test_4_individual_daily_limit_and_cbs_account_restrictions PASSED [ 73%]
+tests/test_switch_integration.py::test_5_beneficiary_inoperative_de39_91_reverses_and_releases_hold PASSED [ 80%]
+tests/test_switch_integration.py::test_6_optimistic_lock_contention_solvency_and_deadlock_avoidance PASSED [ 86%]
+tests/test_switch_integration.py::test_7_commit_then_drop_0210_lost_ack_compensates_across_all_three_dbs PASSED [ 93%]
+tests/test_switch_integration.py::test_8_concurrent_0420_race_and_wallet_commit_then_drop PASSED [100%]
+
+============================= 15 passed in 14.84s =============================
+```
 
 ---
 
@@ -255,7 +286,7 @@ The entire 10-container mTLS microservices topology is also defined declarativel
 - **Terraform (`infra/terraform/`):** Generates the `METIX-SIMOREDE-ROOT-CA` and all 4 per-service mTLS X.509 certificates (`modules/pki`), creates the `metix-switch` namespace and Secrets (`modules/k8s_foundation`), and applies/destroys the Kustomize overlay.
 - **Kubernetes (`infra/k8s/`):** Runs 4 persistent StatefulSets (`postgres`, `bci-postgres`, `stdb-postgres`, `redis`), 6 Deployments (`bci-cbs`, `stdb-cbs`, `wallet-sim`, `switch-api`, `sla-sweeper`, `frontend`) with mTLS `exec` probes, and `NetworkPolicy` resources enforcing **Bank Core Isolation** between participant databases.
 - **GitHub Actions (`.github/workflows/`):**
-  - `ci-app.yml`: Backend `ruff` lint/format + all 12 `pytest` integration tests against 3× PostgreSQL 16 + Redis 7, Next.js `tsc` + production build, and local container builds.
+  - `ci-app.yml`: Backend `ruff` lint/format + all 15 `pytest` integration tests against 3× PostgreSQL 16 + Redis 7, Next.js `tsc` + production build, and local container builds.
   - `ci-infra.yml`: `terraform fmt`/`validate`, `tflint`, `kubectl kustomize` + `kubeconform` schema validation, and an ephemeral `kind` cluster E2E smoke test (`scripts/k8s-smoke-test.py`) executing a real mTLS interbank transfer in CI.
 
 **Prerequisites:** Docker Desktop with **Kubernetes enabled** (*Settings → Kubernetes → Enable Kubernetes*), `kubectl`, and `terraform` (`>= 1.9`).
@@ -293,7 +324,7 @@ Register 3 separate servers in **pgAdmin 4** (*Servers → Register → Server..
 # 1. Start the 3 isolated PostgreSQL 16 databases + Redis 7
 docker compose up -d --wait postgres bci-postgres stdb-postgres redis
 
-# 2. Sync Python 3.14 environment, lint, format-check, and run all 12 tests
+# 2. Sync Python 3.14 environment, lint, format-check, and run all 15 tests
 uv --directory backend sync --python 3.14
 uv --directory backend run ruff check .
 uv --directory backend run ruff format --check .
@@ -325,7 +356,7 @@ bun run --cwd frontend build
 ```text
 metix-switch-sim/
 ├── .github/workflows/
-│   ├── ci-app.yml                         # Backend ruff + 12 pytest (3x PG16 + Redis), Frontend build, Docker builds
+│   ├── ci-app.yml                         # Backend ruff + 15 pytest (3x PG16 + Redis), Frontend build, Docker builds
 │   └── ci-infra.yml                       # Terraform fmt/validate/tflint, kubeconform, ephemeral kind E2E smoke test
 ├── infra/
 │   ├── k8s/
@@ -339,6 +370,7 @@ metix-switch-sim/
 ├── INVARIANTS.md                          # Financial, ISO 8583, concurrency & SPIM SLA invariants
 ├── docker-compose.yml                     # 10-container mTLS stack (3× PG16, Redis, PKI, BCI/STDB CBS, Wallet, Switch, Sweeper, UI)
 ├── docs/
+│   ├── lost-acknowledgment-recovery.md    # Lost ACK (commit_then_drop_0210) sequence diagram, ISO trace, 3-DB balances & journals
 │   ├── images/                            # Architecture SVGs & dashboard screenshots
 │   └── recordings/                        # Live E2E walkthrough recordings (recording.mp4, recording_2.mp4, recording_3.mp4)
 ├── backend/
@@ -362,8 +394,8 @@ metix-switch-sim/
 │   │   └── workers/sla_sweeper.py         # Dedicated 25s SPIM SLA reversal worker (0420/0430 + CBS hold release)
 │   └── tests/
 │       ├── conftest.py                    # 3-DB isolated async fixtures + ASGI/OAuth2/Ed25519 harness
-│       ├── test_switch_integration.py     # 8 core ISO 8583, CBS hold/capture, SLA, limit & concurrency tests
-│       └── test_enterprise_features.py    # 4 MNS settlement, 3-way recon/4-eyes, fraud & enterprise security tests
+│       ├── test_switch_integration.py     # 10 core ISO 8583, CBS hold/capture, SLA, lost-ACK, limit & concurrency tests
+│       └── test_enterprise_features.py    # 5 MNS settlement, 3-way recon/4-eyes, fraud, on-us & enterprise security tests
 └── frontend/
     └── src/
         ├── lib/                           # OAuth 2.0 persona-aware API client, types, MZN formatting

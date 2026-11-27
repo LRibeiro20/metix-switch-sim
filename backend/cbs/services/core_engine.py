@@ -1037,11 +1037,27 @@ class CbsCoreEngine:
 
             if chaos.force_de39 and chaos.force_de39 != "00":
                 resp = build_0210(msg, response_code=chaos.force_de39)
+                if chaos.commit_then_drop_0210:
+                    return 202, {
+                        "dropped": True,
+                        "beneficiary": self.settings.bank_code,
+                        "reason": "Chaos commit_then_drop_0210 active — 0210 ACK dropped on wire",
+                    }
                 return 200, {"dropped": False, "iso_message": resp.model_dump(mode="json")}
 
-            return await self._credit_beneficiary_0200(
+            status_code, payload = await self._credit_beneficiary_0200(
                 msg, switch_tx_id=switch_tx_id, signature_verified=signature_verified
             )
+            if chaos.commit_then_drop_0210:
+                return 202, {
+                    "dropped": True,
+                    "beneficiary": self.settings.bank_code,
+                    "reason": (
+                        "Chaos commit_then_drop_0210 active — beneficiary credit committed, "
+                        "0210 ACK dropped on wire"
+                    ),
+                }
+            return status_code, payload
 
         if msg.mti == MTI.REVERSAL_ADVICE:
             if chaos.fail_0430:
@@ -1195,15 +1211,21 @@ class CbsCoreEngine:
         gl_number = BANK_CLEARING_GL_ACCOUNT[self.settings.bank_code]
         idemp_key = f"credit:{msg.de11}:{msg.de37}"
 
-        async with self.session_factory() as session:
-            existing = (
-                await session.execute(
-                    select(CbsTransaction)
-                    .where(CbsTransaction.idempotency_key == idemp_key)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if existing is not None and existing.status == CbsTxStatus.POSTED.value:
+        for _attempt in range(6):
+            async with self.session_factory() as session:
+                existing = (
+                    await session.execute(
+                        select(CbsTransaction)
+                        .where(CbsTransaction.idempotency_key == idemp_key)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if existing is None or existing.status != CbsTxStatus.POSTED.value:
+                    # Credit either never committed (e.g. drop_0210) or was already compensated
+                    # by an earlier 0420 — return idempotent 0430 (DE 39 = 00).
+                    resp = build_0430(msg, response_code="00")
+                    return 200, {"dropped": False, "iso_message": resp.model_dump(mode="json")}
+
                 acct = (
                     await session.execute(
                         select(CbsAccount)
@@ -1218,37 +1240,78 @@ class CbsCoreEngine:
                         .execution_options(populate_existing=True)
                     )
                 ).scalar_one()
-                if acct.available_balance_centavos >= existing.amount_centavos:
-                    await session.execute(
-                        update(CbsAccount)
-                        .where(CbsAccount.id == acct.id)
-                        .values(
-                            ledger_balance_centavos=(
-                                CbsAccount.ledger_balance_centavos - existing.amount_centavos
-                            ),
-                            available_balance_centavos=(
-                                CbsAccount.available_balance_centavos - existing.amount_centavos
-                            ),
-                            version=CbsAccount.version + 1,
-                        )
-                    )
-                    await session.execute(
-                        update(CbsAccount)
-                        .where(CbsAccount.id == gl_acct.id)
-                        .values(
-                            ledger_balance_centavos=(
-                                CbsAccount.ledger_balance_centavos + existing.amount_centavos
-                            ),
-                            available_balance_centavos=(
-                                CbsAccount.available_balance_centavos + existing.amount_centavos
-                            ),
-                            version=CbsAccount.version + 1,
-                        )
-                    )
-                    existing.status = CbsTxStatus.REVERSED.value
-                    await session.commit()
 
-        resp = build_0430(msg, response_code="00")
+                if acct.available_balance_centavos < existing.amount_centavos:
+                    resp = build_0430(msg, response_code="51")
+                    return 200, {"dropped": False, "iso_message": resp.model_dump(mode="json")}
+
+                # Deterministic UUID-ordered CAS on CbsAccount.version
+                updates = sorted(
+                    [
+                        (acct.id, acct.version, -existing.amount_centavos, True),
+                        (gl_acct.id, gl_acct.version, +existing.amount_centavos, False),
+                    ],
+                    key=lambda item: item[0],
+                )
+                conflict = False
+                for aid, ver, delta, check_avail in updates:
+                    conds = [CbsAccount.id == aid, CbsAccount.version == ver]
+                    if check_avail:
+                        conds.append(
+                            CbsAccount.available_balance_centavos >= existing.amount_centavos
+                        )
+                    res = cast(
+                        CursorResult[Any],
+                        await session.execute(
+                            update(CbsAccount)
+                            .where(*conds)
+                            .values(
+                                ledger_balance_centavos=CbsAccount.ledger_balance_centavos + delta,
+                                available_balance_centavos=(
+                                    CbsAccount.available_balance_centavos + delta
+                                ),
+                                version=CbsAccount.version + 1,
+                                updated_at=func.now(),
+                            )
+                        ),
+                    )
+                    if res.rowcount != 1:
+                        conflict = True
+                        break
+                if conflict:
+                    await session.rollback()
+                    continue
+
+                existing.status = CbsTxStatus.REVERSED.value
+                je = CbsJournalEntry(
+                    cbs_transaction_id=existing.id,
+                    entry_type="INBOUND_REVERSAL",
+                    description=f"Reversal (0420) of inbound credit STAN {msg.de11}",
+                )
+                session.add(je)
+                await session.flush()
+                session.add_all(
+                    [
+                        CbsJournalPosting(
+                            journal_entry_id=je.id,
+                            account_id=acct.id,
+                            direction="DEBIT",
+                            amount_centavos=existing.amount_centavos,
+                        ),
+                        CbsJournalPosting(
+                            journal_entry_id=je.id,
+                            account_id=gl_acct.id,
+                            direction="CREDIT",
+                            amount_centavos=existing.amount_centavos,
+                        ),
+                    ]
+                )
+                await session.commit()
+
+                resp = build_0430(msg, response_code="00")
+                return 200, {"dropped": False, "iso_message": resp.model_dump(mode="json")}
+
+        resp = build_0430(msg, response_code="96")
         return 200, {"dropped": False, "iso_message": resp.model_dump(mode="json")}
 
     async def list_transactions(self, limit: int = 100) -> list[CbsTransactionOut]:
